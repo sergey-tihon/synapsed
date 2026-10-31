@@ -211,6 +211,9 @@ try {
       await cargo(["build", "-p", "synapsed-macos-tray"]);
       break;
     case "lint":
+      // Clippy compiles the web-ui feature, which embeds the built dashboard.
+      await npm("@synapsed/client", "build");
+      await npm("@synapsed/web", "build");
       await cargo([
         "clippy",
         "--workspace",
