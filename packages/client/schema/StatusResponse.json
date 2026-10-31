@@ -1,0 +1,143 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "definitions": {
+    "ApiError": {
+      "properties": {
+        "code": {
+          "$ref": "#/definitions/ErrorCode"
+        },
+        "message": {
+          "maxLength": 256,
+          "type": "string"
+        }
+      },
+      "required": [
+        "code",
+        "message"
+      ],
+      "type": "object"
+    },
+    "DriverState": {
+      "enum": [
+        "disabled",
+        "online",
+        "disconnected",
+        "ambiguous",
+        "permission_denied",
+        "error"
+      ],
+      "type": "string"
+    },
+    "DriverStatus": {
+      "properties": {
+        "error": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ApiError"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "id": {
+          "maxLength": 256,
+          "minLength": 1,
+          "type": "string"
+        },
+        "state": {
+          "$ref": "#/definitions/DriverState"
+        },
+        "version": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "version",
+        "state",
+        "error"
+      ],
+      "type": "object"
+    },
+    "ErrorCode": {
+      "enum": [
+        "invalid_request",
+        "forbidden_origin",
+        "forbidden_host",
+        "unknown_device",
+        "unknown_characteristic",
+        "ambiguous_device",
+        "driver_conflict",
+        "unsupported_operation",
+        "invalid_value",
+        "permission_denied",
+        "device_unavailable",
+        "ddc_error",
+        "plugin_error",
+        "unsupported_capability",
+        "busy",
+        "timeout"
+      ],
+      "type": "string"
+    },
+    "NodeInfo": {
+      "properties": {
+        "instanceId": {
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+          "type": "string"
+        },
+        "name": {
+          "maxLength": 128,
+          "minLength": 1,
+          "type": "string"
+        },
+        "nodeId": {
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "nodeId",
+        "instanceId",
+        "name"
+      ],
+      "type": "object"
+    }
+  },
+  "properties": {
+    "apiVersion": {
+      "maximum": 1,
+      "minimum": 1,
+      "type": "integer"
+    },
+    "drivers": {
+      "items": {
+        "$ref": "#/definitions/DriverStatus"
+      },
+      "maxItems": 16,
+      "type": "array"
+    },
+    "node": {
+      "$ref": "#/definitions/NodeInfo"
+    },
+    "revision": {
+      "pattern": "^(0|[1-9][0-9]*)$",
+      "type": "string"
+    },
+    "uptimeSeconds": {
+      "maximum": 4294967295,
+      "minimum": 0,
+      "type": "integer"
+    }
+  },
+  "required": [
+    "apiVersion",
+    "node",
+    "revision",
+    "uptimeSeconds",
+    "drivers"
+  ],
+  "title": "StatusResponse",
+  "type": "object"
+}

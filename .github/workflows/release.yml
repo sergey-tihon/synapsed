@@ -1,0 +1,81 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Package (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-26
+            target: aarch64-apple-darwin
+          - runner: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+    runs-on: ${{ matrix.runner }}
+    env:
+      MACOSX_DEPLOYMENT_TARGET: "12.0"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - uses: dtolnay/rust-toolchain@1.90.0
+      - run: npm ci
+      - run: node scripts/workspace.mjs check-release "$GITHUB_REF_NAME"
+      - run: npm test
+      - run: npm run validate
+        if: runner.os == 'macOS'
+      - run: npm run lint:raycast
+        if: runner.os == 'macOS'
+      - run: npm run smoke
+      - run: npm run pack
+      - uses: actions/upload-artifact@v4
+        with:
+          name: synapsed-release-${{ matrix.target }}
+          path: |
+            dist/*.tar.gz
+            dist/*.streamDeckPlugin
+            dist/*.rayext
+            dist/*.sha256
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: Publish GitHub release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: synapsed-release-*
+          path: release-assets
+          merge-multiple: true
+      - name: Verify release version and assets
+        run: node scripts/release.mjs "$GITHUB_REF_NAME"
+      - name: Publish daemon and native clients
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          mapfile -d '' assets < <(find release-assets -maxdepth 1 -type f \( -name '*.tar.gz' -o -name '*.streamDeckPlugin' -o -name '*.rayext' -o -name '*.sha256' \) -print0)
+          gh release create "$GITHUB_REF_NAME" "${assets[@]}" \
+            --title "Synapsed $GITHUB_REF_NAME" \
+            --generate-notes \
+            --verify-tag

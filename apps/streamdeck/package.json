@@ -1,0 +1,34 @@
+{
+  "name": "@synapsed/streamdeck",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "build": "rollup -c",
+    "link": "streamdeck link ./com.sergey-tihon.synapsed.sdPlugin",
+    "restart": "streamdeck restart com.sergey-tihon.synapsed",
+    "validate": "streamdeck validate ./com.sergey-tihon.synapsed.sdPlugin",
+    "pack": "node ../../scripts/workspace.mjs pack-plugin",
+    "watch": "rollup -c -w --watch.onEnd=\"streamdeck restart com.sergey-tihon.synapsed\""
+  },
+  "dependencies": {
+    "@elgato/streamdeck": "^3.0.4",
+    "@synapsed/client": "0.1.0",
+    "smol-toml": "1.9.1"
+  },
+  "devDependencies": {
+    "@elgato/cli": "^1.10.4",
+    "@rollup/plugin-commonjs": "^29.0.2",
+    "@rollup/plugin-node-resolve": "^16.0.3",
+    "@rollup/plugin-terser": "^1.0.0",
+    "@rollup/plugin-typescript": "^12.1.0",
+    "@tsconfig/node20": "^20.1.2",
+    "@types/node": "~24.1.0",
+    "rollup": "^4.0.2",
+    "tslib": "^2.6.2",
+    "typescript": "^5.2.2"
+  }
+}

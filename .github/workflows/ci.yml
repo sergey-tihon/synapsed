@@ -1,0 +1,56 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Verify (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-26
+            target: aarch64-apple-darwin
+          - runner: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+    runs-on: ${{ matrix.runner }}
+    env:
+      MACOSX_DEPLOYMENT_TARGET: "12.0"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - uses: dtolnay/rust-toolchain@1.90.0
+        with:
+          components: rustfmt
+      - run: npm ci
+      - run: npm run audit
+      - run: npm run format:check
+      - run: npm test
+      - run: npm run validate
+        if: runner.os == 'macOS'
+      - run: npm run lint:raycast
+        if: runner.os == 'macOS'
+      - run: npm run smoke
+      - run: npm run pack
+      - uses: actions/upload-artifact@v4
+        with:
+          name: synapsed-${{ matrix.target }}
+          path: |
+            dist/*.tar.gz
+            dist/*.streamDeckPlugin
+            dist/*.rayext
+            dist/*.sha256
+          if-no-files-found: error
+          retention-days: 14

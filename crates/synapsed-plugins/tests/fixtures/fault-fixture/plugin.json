@@ -1,0 +1,10 @@
+{
+  "apiVersion": 1,
+  "id": "fault-fixture",
+  "version": "0.1.0",
+  "entry": "driver.lua",
+  "dependencies": [],
+  "supersedes": [],
+  "capabilities": { "ddc": 1 },
+  "permissions": { "ddc": { "read": [16, 32, 33], "write": [16, 33] } }
+}

@@ -1,0 +1,11 @@
+**/node_modules/
+**/dist/
+**/target/
+**/*.sdPlugin/bin/
+**/*.sdPlugin/logs/
+apps/raycast/raycast-env.d.ts
+packages/client/schema/
+packages/client/src/generated/
+package-lock.json
+Cargo.lock
+apps/streamdeck/com.sergey-tihon.synapsed.sdPlugin/ui/sdpi-components.js

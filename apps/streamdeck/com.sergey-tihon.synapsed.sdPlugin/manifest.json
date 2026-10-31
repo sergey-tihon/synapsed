@@ -1,0 +1,51 @@
+{
+  "$schema": "https://schemas.elgato.com/streamdeck/plugins/manifest.json",
+  "Name": "Synapsed",
+  "Version": "0.1.0.0",
+  "Author": "Sergey Tihon",
+  "Description": "Inspect and control local device characteristics through Synapsed.",
+  "UUID": "com.sergey-tihon.synapsed",
+  "Icon": "imgs/plugin/marketplace",
+  "Category": "Synapsed",
+  "CategoryIcon": "imgs/plugin/category-icon",
+  "CodePath": "bin/plugin.js",
+  "SDKVersion": 3,
+  "Software": {
+    "MinimumVersion": "7.1"
+  },
+  "Nodejs": {
+    "Version": "24"
+  },
+  "OS": [
+    {
+      "Platform": "mac",
+      "MinimumVersion": "12"
+    }
+  ],
+  "Actions": [
+    {
+      "Name": "Characteristic",
+      "UUID": "com.sergey-tihon.synapsed.characteristic",
+      "Icon": "imgs/actions/benq/icon",
+      "Tooltip": "Bind a local characteristic. Rotate to step; press runs the configured command or secondary binding.",
+      "PropertyInspectorPath": "ui/characteristic.html",
+      "Controllers": ["Keypad", "Encoder"],
+      "UserTitleEnabled": false,
+      "Encoder": {
+        "Icon": "imgs/actions/benq/key",
+        "layout": "layouts/metric.json",
+        "TriggerDescription": {
+          "Rotate": "Step the bound number or enum",
+          "Push": "Run the primary or configured press command"
+        }
+      },
+      "States": [
+        {
+          "Image": "imgs/actions/benq/key",
+          "Title": "Configure",
+          "TitleAlignment": "middle"
+        }
+      ]
+    }
+  ]
+}

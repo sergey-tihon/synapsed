@@ -1,0 +1,60 @@
+{
+  "name": "synapsed",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "license": "MIT OR Apache-2.0",
+  "engines": {
+    "node": ">=24"
+  },
+  "workspaces": [
+    "packages/client",
+    "apps/web",
+    "apps/streamdeck",
+    "apps/raycast"
+  ],
+  "overrides": {
+    "zod": "^4.6.7",
+    "seroval": "1.6.11",
+    "@raycast/api": {
+      "minimatch": "11.0.1"
+    }
+  },
+  "scripts": {
+    "build": "node scripts/workspace.mjs build",
+    "api:generate": "node scripts/api.mjs generate",
+    "api:check": "node scripts/api.mjs check",
+    "build:client": "npm run build --workspace @synapsed/client",
+    "build:web": "npm run build:client && npm run build --workspace @synapsed/web",
+    "build:server": "npm run build:web && node scripts/workspace.mjs build-server",
+    "build:plugin": "npm run build:client && npm run build --workspace @synapsed/streamdeck",
+    "build:tray": "node scripts/workspace.mjs build-tray",
+    "build:raycast": "npm run build:client && node apps/raycast/scripts/run-ray.mjs build",
+    "lint:raycast": "node apps/raycast/scripts/run-ray.mjs lint",
+    "test": "node scripts/workspace.mjs test",
+    "validate": "node scripts/workspace.mjs validate",
+    "pack": "node scripts/workspace.mjs pack",
+    "pack:plugin": "node scripts/workspace.mjs pack-plugin",
+    "pack:tray": "node scripts/workspace.mjs pack-tray",
+    "pack:raycast": "node scripts/workspace.mjs pack-raycast",
+    "link": "npm run link --workspace @synapsed/streamdeck",
+    "restart": "npm run restart --workspace @synapsed/streamdeck",
+    "watch": "npm run build:client && npm run watch --workspace @synapsed/streamdeck",
+    "dev:web": "npm run build:client && npm run dev --workspace @synapsed/web",
+    "dev:raycast": "npm run build:client && node apps/raycast/scripts/run-ray.mjs develop",
+    "audit": "npm audit --workspaces --include-workspace-root --omit=dev",
+    "format": "npm run format:rust && npm run format:web && npm run format:lua",
+    "format:check": "npm run format:rust:check && npm run format:web:check && npm run format:lua:check",
+    "format:rust": "cargo fmt --all",
+    "format:rust:check": "cargo fmt --all -- --check",
+    "format:web": "prettier --write .",
+    "format:web:check": "prettier --check .",
+    "format:lua": "stylua --glob '**/*.lua' drivers crates",
+    "format:lua:check": "stylua --check --glob '**/*.lua' drivers crates",
+    "smoke": "node scripts/smoke.mjs"
+  },
+  "devDependencies": {
+    "@johnnymorganz/stylua-bin": "2.5.2",
+    "prettier": "3.8.3"
+  }
+}

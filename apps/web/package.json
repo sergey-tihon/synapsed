@@ -1,0 +1,24 @@
+{
+  "name": "@synapsed/web",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "license": "MIT OR Apache-2.0",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "build": "tsc --noEmit && vite build",
+    "dev": "vite"
+  },
+  "dependencies": {
+    "@synapsed/client": "0.1.0",
+    "solid-js": "2.0.0-rc.15",
+    "@solidjs/web": "2.0.0-rc.15"
+  },
+  "devDependencies": {
+    "@solidjs/vite-plugin": "3.0.0-next.35",
+    "vite": "8.2.1",
+    "typescript": "5.9.3"
+  }
+}

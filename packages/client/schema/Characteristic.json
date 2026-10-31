@@ -1,0 +1,264 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "definitions": {
+    "ApiError": {
+      "properties": {
+        "code": {
+          "$ref": "#/definitions/ErrorCode"
+        },
+        "message": {
+          "maxLength": 256,
+          "type": "string"
+        }
+      },
+      "required": [
+        "code",
+        "message"
+      ],
+      "type": "object"
+    },
+    "CharacteristicAccess": {
+      "properties": {
+        "notify": {
+          "type": "boolean"
+        },
+        "read": {
+          "type": "boolean"
+        },
+        "write": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "read",
+        "write",
+        "notify"
+      ],
+      "type": "object"
+    },
+    "CharacteristicSpec": {
+      "oneOf": [
+        {
+          "properties": {
+            "integer": {
+              "type": "boolean"
+            },
+            "kind": {
+              "const": "number",
+              "type": "string"
+            },
+            "maximum": {
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "minimum": {
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "step": {
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "unit": {
+              "maxLength": 32,
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "kind",
+            "minimum",
+            "maximum",
+            "step",
+            "integer",
+            "unit"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "kind": {
+              "const": "boolean",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "kind": {
+              "const": "enum",
+              "type": "string"
+            },
+            "options": {
+              "items": {
+                "$ref": "#/definitions/EnumOption"
+              },
+              "maxItems": 32,
+              "minItems": 1,
+              "type": "array"
+            }
+          },
+          "required": [
+            "kind",
+            "options"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "kind": {
+              "const": "string",
+              "type": "string"
+            },
+            "maxLength": {
+              "maximum": 1024,
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "kind",
+            "maxLength"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "kind": {
+              "const": "action",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "CharacteristicStatus": {
+      "enum": [
+        "ok",
+        "unavailable",
+        "error"
+      ],
+      "type": "string"
+    },
+    "CharacteristicValue": {
+      "anyOf": [
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "number"
+        },
+        {
+          "maxLength": 1024,
+          "type": "string"
+        }
+      ]
+    },
+    "EnumOption": {
+      "properties": {
+        "label": {
+          "maxLength": 128,
+          "minLength": 1,
+          "type": "string"
+        },
+        "value": {
+          "maxLength": 1024,
+          "type": "string"
+        }
+      },
+      "required": [
+        "value",
+        "label"
+      ],
+      "type": "object"
+    },
+    "ErrorCode": {
+      "enum": [
+        "invalid_request",
+        "forbidden_origin",
+        "forbidden_host",
+        "unknown_device",
+        "unknown_characteristic",
+        "ambiguous_device",
+        "driver_conflict",
+        "unsupported_operation",
+        "invalid_value",
+        "permission_denied",
+        "device_unavailable",
+        "ddc_error",
+        "plugin_error",
+        "unsupported_capability",
+        "busy",
+        "timeout"
+      ],
+      "type": "string"
+    }
+  },
+  "properties": {
+    "access": {
+      "$ref": "#/definitions/CharacteristicAccess"
+    },
+    "error": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/ApiError"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "id": {
+      "pattern": "^[a-z][a-z0-9_.-]{0,63}$",
+      "type": "string"
+    },
+    "label": {
+      "maxLength": 128,
+      "minLength": 1,
+      "type": "string"
+    },
+    "spec": {
+      "$ref": "#/definitions/CharacteristicSpec"
+    },
+    "status": {
+      "$ref": "#/definitions/CharacteristicStatus"
+    },
+    "value": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/CharacteristicValue"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    }
+  },
+  "required": [
+    "id",
+    "label",
+    "spec",
+    "access",
+    "value",
+    "status",
+    "error"
+  ],
+  "title": "Characteristic",
+  "type": "object"
+}

@@ -1,0 +1,32 @@
+# AGENTS.md
+
+## Project
+
+Synapsed is a Rust user daemon for macOS Apple Silicon and Linux x86_64/aarch64, deployed Lua device drivers, one local characteristic API and shared clients. The architectural contract is in `docs/specs/0000-repository.md` and `docs/adr/`; design documents are not proof of native surfaces or physical hardware behavior. Generic brightness and verified BenQ RD280U behavior belong only to installed Lua; no embedded driver or Rust brightness fallback. Network publication/discovery, Home Assistant and other reserved integrations are outside this local milestone.
+
+## Build and verification
+
+- Root commands orchestrate the Rust/TS workspaces; the Swift helper and direct Stream Deck hardware path have been removed.
+- Final `npm test` includes builds, generated-schema drift checking, locked platform-selected Cargo tests and shared TS client behavior tests. `npm run validate` validates the renamed Stream Deck manifest/assets on macOS.
+- `npm run pack` packages current-host daemon/CLI/external drivers and supported client artifacts under root `dist/`; packaging is not native UI or physical hardware proof.
+- `npm run link`, `npm run restart` and `npm run watch` target the renamed Stream Deck plugin. Web and Raycast development use their explicit root commands; shared-client changes require rebuilding and restarting Raycast's developer process.
+- Run assigned verification after changes; distinguish hardware-free, no-device process, native surface and physical hardware evidence. Keep the single root `package-lock.json` and `Cargo.lock` in sync; do not introduce nested dependency locks.
+- Contributor source workflows and technical setup live in `CONTRIBUTE.md`; keep README focused on installing and using delivered components. Root `npm run format` / `format:check` cover Rustfmt, Prettier and StyLua; `npm run audit` checks production npm dependencies across workspaces and the root. Preserve generated/vendor/build exclusions.
+
+## Implementation constraints
+
+- The shipped Lua monitor drivers support one external DDC/CI monitor at a time; refuse multiple or eligible denied candidates that prevent uniqueness rather than guessing. The host API itself has no one-monitor slot or closed device-kind enum.
+- Do not treat BenQ VCP `0x19`, `0xD7`, or `0xD9` as generic features. Gate behavior/ranges in deployed RD280U Lua using verified name/fingerprint and endpoint ownership/identity rules. No DP2 installation gate or broad BenQ claim; do not loosen checks on unexpected hardware.
+- Dial rotations use signed `DialRotateEvent.payload.ticks`: clockwise positive, counterclockwise negative. Clamp typed steps to -100..100, skip zero and unsupported metadata. Generic primary/optional press bindings replace model-specific classes/settings; keep handlers, manifest `Controllers`/`Encoder`, layout visibility and inspector fields aligned.
+- Stream Deck and other clients use shared typed daemon calls (`set`, `step`, `toggle`, `invoke`) and generated public types/validators. No helper `execFile`, shell, arbitrary commands, raw VCP route, local hardware fallback or client-side relative hardware arithmetic. Rust native transport is the sole native owner; Lua owns device policy and packed-field transformations.
+- Persist selected device/characteristic IDs and typed commands only. Unbound means Configure; missing/inapplicable bindings send nothing. Render confirmed metadata/state, retain failed/offline readings explicitly stale and never display requested values as observations. The inspector obtains catalogs through the plugin, not another daemon socket or hardware path.
+- Native DDC writes change real monitor settings. Do not perform physical writes unless exact prior brightness/eye-care/packed-register values and flags can reliably be restored with finally/trap protection. Prefer hardware-free protocol/Lua tests; do not confuse fixtures with physical behavior. Never run two hardware writers on the same display.
+- `apps/streamdeck/com.sergey-tihon.synapsed.sdPlugin/ui/sdpi-components.js` is the committed v4.0.1 inspector library for reproducible offline bundles. This version is not published on npm; official SDPI setup distributes a downloaded local JS file. Preserve vendor notices and compatible settings bindings. Use actual `datasource`/hot-reload APIs and context-scoped replies, not nonexistent `data-source` attributes or initialization write loops.
+- macOS DDC uses private IOKit `IOAVService`; keep documented stability and target-bound EDID/minimum-OS verification limits current. Missing optional EDID symbols must not break generic Lua brightness. Linux DDC is a separate real i2c-dev backend; do not claim Intel macOS/Windows or physical Linux verification without evidence. No auto-sudo, forced I2C access or world-writable workaround.
+- Installed Lua is trusted local code. Guarded callbacks, budgets and quarantine do not guarantee hostile-code termination; supervised processes are needed for that trust model. Never expose shell/FFI/arbitrary filesystem/network capabilities.
+- The local server accepts loopback only with exact Host/Origin checks; no token/auth/network discovery options in this phase. Loopback is not OS-user authentication. Do not read/log private settings, credentials, source or raw EDID; client config is endpoint-only.
+- UUID/settings cutover is deliberate: replace `com.sergey-tihon.streamdeck-monitor-control` and its five actions with `com.sergey-tihon.synapsed.characteristic` in bundle `com.sergey-tihon.synapsed`. No aliases or automatic settings migration; users remove the old plugin to prevent a second writer, re-add actions and explicitly bind characteristics.
+
+## Releases
+
+Keep Rust/npm/app version `0.1.0` and Stream Deck manifest/tag version `0.1.0.0` aligned. GitHub generates release notes; do not require or maintain `CHANGELOG.md` entries or a local release-notes file. Release workflows publish current-host daemon/CLI/external drivers and supported Stream Deck/tray/Raycast artifacts with SHA-256 checksums; no tag push, publication, signing or service enablement occurs automatically during builds. Unsigned/unnotarized tray archives remain labeled accordingly. Preserve user work, both license texts and vendor notices; never package home configs/logs/tokens/keys/raw hardware dumps. Native build/packaging results and physical/native-surface limits must be reported truthfully.

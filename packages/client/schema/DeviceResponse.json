@@ -1,0 +1,365 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "definitions": {
+    "ApiError": {
+      "properties": {
+        "code": {
+          "$ref": "#/definitions/ErrorCode"
+        },
+        "message": {
+          "maxLength": 256,
+          "type": "string"
+        }
+      },
+      "required": [
+        "code",
+        "message"
+      ],
+      "type": "object"
+    },
+    "Characteristic": {
+      "properties": {
+        "access": {
+          "$ref": "#/definitions/CharacteristicAccess"
+        },
+        "error": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ApiError"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "id": {
+          "pattern": "^[a-z][a-z0-9_.-]{0,63}$",
+          "type": "string"
+        },
+        "label": {
+          "maxLength": 128,
+          "minLength": 1,
+          "type": "string"
+        },
+        "spec": {
+          "$ref": "#/definitions/CharacteristicSpec"
+        },
+        "status": {
+          "$ref": "#/definitions/CharacteristicStatus"
+        },
+        "value": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/CharacteristicValue"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "label",
+        "spec",
+        "access",
+        "value",
+        "status",
+        "error"
+      ],
+      "type": "object"
+    },
+    "CharacteristicAccess": {
+      "properties": {
+        "notify": {
+          "type": "boolean"
+        },
+        "read": {
+          "type": "boolean"
+        },
+        "write": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "read",
+        "write",
+        "notify"
+      ],
+      "type": "object"
+    },
+    "CharacteristicSpec": {
+      "oneOf": [
+        {
+          "properties": {
+            "integer": {
+              "type": "boolean"
+            },
+            "kind": {
+              "const": "number",
+              "type": "string"
+            },
+            "maximum": {
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "minimum": {
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "step": {
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "unit": {
+              "maxLength": 32,
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "kind",
+            "minimum",
+            "maximum",
+            "step",
+            "integer",
+            "unit"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "kind": {
+              "const": "boolean",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "kind": {
+              "const": "enum",
+              "type": "string"
+            },
+            "options": {
+              "items": {
+                "$ref": "#/definitions/EnumOption"
+              },
+              "maxItems": 32,
+              "minItems": 1,
+              "type": "array"
+            }
+          },
+          "required": [
+            "kind",
+            "options"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "kind": {
+              "const": "string",
+              "type": "string"
+            },
+            "maxLength": {
+              "maximum": 1024,
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "kind",
+            "maxLength"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "kind": {
+              "const": "action",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "CharacteristicStatus": {
+      "enum": [
+        "ok",
+        "unavailable",
+        "error"
+      ],
+      "type": "string"
+    },
+    "CharacteristicValue": {
+      "anyOf": [
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "number"
+        },
+        {
+          "maxLength": 1024,
+          "type": "string"
+        }
+      ]
+    },
+    "Device": {
+      "properties": {
+        "characteristics": {
+          "items": {
+            "$ref": "#/definitions/Characteristic"
+          },
+          "maxItems": 64,
+          "type": "array"
+        },
+        "driver": {
+          "pattern": "^[a-z][a-z0-9-]{0,63}$",
+          "type": "string"
+        },
+        "error": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ApiError"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "id": {
+          "pattern": "^[a-z][a-z0-9_.-]{0,63}$",
+          "type": "string"
+        },
+        "kind": {
+          "pattern": "^[a-z][a-z0-9_.-]{0,63}$",
+          "type": "string"
+        },
+        "label": {
+          "maxLength": 128,
+          "minLength": 1,
+          "type": "string"
+        },
+        "status": {
+          "$ref": "#/definitions/DeviceStatus"
+        }
+      },
+      "required": [
+        "id",
+        "driver",
+        "kind",
+        "label",
+        "status",
+        "error",
+        "characteristics"
+      ],
+      "type": "object"
+    },
+    "DeviceStatus": {
+      "enum": [
+        "online",
+        "unavailable"
+      ],
+      "type": "string"
+    },
+    "EnumOption": {
+      "properties": {
+        "label": {
+          "maxLength": 128,
+          "minLength": 1,
+          "type": "string"
+        },
+        "value": {
+          "maxLength": 1024,
+          "type": "string"
+        }
+      },
+      "required": [
+        "value",
+        "label"
+      ],
+      "type": "object"
+    },
+    "ErrorCode": {
+      "enum": [
+        "invalid_request",
+        "forbidden_origin",
+        "forbidden_host",
+        "unknown_device",
+        "unknown_characteristic",
+        "ambiguous_device",
+        "driver_conflict",
+        "unsupported_operation",
+        "invalid_value",
+        "permission_denied",
+        "device_unavailable",
+        "ddc_error",
+        "plugin_error",
+        "unsupported_capability",
+        "busy",
+        "timeout"
+      ],
+      "type": "string"
+    },
+    "NodeInfo": {
+      "properties": {
+        "instanceId": {
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+          "type": "string"
+        },
+        "name": {
+          "maxLength": 128,
+          "minLength": 1,
+          "type": "string"
+        },
+        "nodeId": {
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "nodeId",
+        "instanceId",
+        "name"
+      ],
+      "type": "object"
+    }
+  },
+  "properties": {
+    "device": {
+      "$ref": "#/definitions/Device"
+    },
+    "node": {
+      "$ref": "#/definitions/NodeInfo"
+    },
+    "revision": {
+      "pattern": "^(0|[1-9][0-9]*)$",
+      "type": "string"
+    }
+  },
+  "required": [
+    "node",
+    "revision",
+    "device"
+  ],
+  "title": "DeviceResponse",
+  "type": "object"
+}

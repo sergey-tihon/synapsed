@@ -1,0 +1,11 @@
+[Unit]
+Description=Synapsed local Lua hardware service
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/synapsed
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=default.target

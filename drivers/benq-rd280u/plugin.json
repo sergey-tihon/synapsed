@@ -1,0 +1,12 @@
+{
+  "apiVersion": 1,
+  "id": "benq-rd280u",
+  "version": "0.1.0",
+  "entry": "driver.lua",
+  "dependencies": ["generic-ddc"],
+  "supersedes": ["generic-ddc"],
+  "capabilities": { "ddc": 1 },
+  "permissions": {
+    "ddc": { "read": [16, 25, 215, 217], "write": [16, 25, 215, 217] }
+  }
+}

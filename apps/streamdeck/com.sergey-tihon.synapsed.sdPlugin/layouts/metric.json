@@ -1,0 +1,52 @@
+{
+  "$schema": "https://schemas.elgato.com/streamdeck/plugins/layout.json",
+  "controller": "Encoder",
+  "id": "characteristic-metric",
+  "items": [
+    {
+      "key": "title",
+      "type": "text",
+      "rect": [4, 2, 192, 18],
+      "alignment": "center",
+      "font": { "size": 12, "weight": 600 },
+      "value": "Synapsed"
+    },
+    {
+      "key": "minimum",
+      "type": "text",
+      "rect": [4, 28, 52, 18],
+      "alignment": "left",
+      "font": { "size": 10, "weight": 400 },
+      "enabled": false,
+      "value": ""
+    },
+    {
+      "key": "current",
+      "type": "text",
+      "rect": [60, 24, 80, 28],
+      "alignment": "center",
+      "font": { "size": 20, "weight": 700 },
+      "value": "Configure"
+    },
+    {
+      "key": "maximum",
+      "type": "text",
+      "rect": [144, 28, 52, 18],
+      "alignment": "right",
+      "font": { "size": 10, "weight": 400 },
+      "enabled": false,
+      "value": ""
+    },
+    {
+      "key": "bar",
+      "type": "bar",
+      "rect": [10, 65, 180, 12],
+      "range": { "min": 0, "max": 100 },
+      "bar_fill_c": "#2AA8FF",
+      "bar_bg_c": "#30343A",
+      "border_w": 1,
+      "enabled": false,
+      "value": 0
+    }
+  ]
+}

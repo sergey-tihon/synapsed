@@ -1,0 +1,52 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "definitions": {
+    "ApiError": {
+      "properties": {
+        "code": {
+          "$ref": "#/definitions/ErrorCode"
+        },
+        "message": {
+          "maxLength": 256,
+          "type": "string"
+        }
+      },
+      "required": [
+        "code",
+        "message"
+      ],
+      "type": "object"
+    },
+    "ErrorCode": {
+      "enum": [
+        "invalid_request",
+        "forbidden_origin",
+        "forbidden_host",
+        "unknown_device",
+        "unknown_characteristic",
+        "ambiguous_device",
+        "driver_conflict",
+        "unsupported_operation",
+        "invalid_value",
+        "permission_denied",
+        "device_unavailable",
+        "ddc_error",
+        "plugin_error",
+        "unsupported_capability",
+        "busy",
+        "timeout"
+      ],
+      "type": "string"
+    }
+  },
+  "properties": {
+    "error": {
+      "$ref": "#/definitions/ApiError"
+    }
+  },
+  "required": [
+    "error"
+  ],
+  "title": "ErrorResponse",
+  "type": "object"
+}

@@ -1,0 +1,11 @@
+[server]
+listen = "127.0.0.1:24816"
+allowed_origins = []
+# name defaults to the OS hostname.
+# state_dir defaults to $XDG_STATE_HOME/synapsed or ~/.local/state/synapsed.
+
+[plugins]
+# directory defaults to $XDG_DATA_HOME/synapsed/drivers or ~/.local/share/synapsed/drivers.
+disabled = []
+discovery_interval_ms = 5000
+# Packages are loaded on startup; installation/removal/settings changes require restart.

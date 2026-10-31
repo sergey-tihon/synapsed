@@ -1,0 +1,19 @@
+[package]
+name = "synapsed-ddc"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+synapsed-core = { path = "../synapsed-core" }
+serde = { workspace = true }
+tokio = { workspace = true }
+sha2 = "0.10"
+libc = "0.2"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+i2cdev = "=0.6.2"
+
+[dev-dependencies]
+serde_json = { workspace = true }

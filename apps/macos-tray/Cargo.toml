@@ -1,0 +1,20 @@
+[package]
+name = "synapsed-macos-tray"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "synapsed-macos-tray"
+path = "src/main.rs"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+synapsed-api = { path = "../../crates/synapsed-api" }
+synapsed-client = { path = "../../crates/synapsed-client" }
+tokio.workspace = true
+url = "=2.5.7"
+tray-icon = { version = "=0.26.1", default-features = false }
+tao = { version = "=0.37.0", default-features = false }
+muda = { version = "=0.21.0", default-features = false }
+open = "=5.3.3"
