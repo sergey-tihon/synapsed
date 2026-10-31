@@ -1,19 +1,21 @@
 #![allow(dead_code)]
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::BTreeMap,
     path::PathBuf,
     sync::{Arc, Mutex},
     time::Duration,
 };
 use synapsed::{
     config::{Config, ConfigPaths},
+    inventory::Sources,
     logs::LogRing,
     server::{Application, RunningServer},
 };
-use synapsed_api::{ApiError, ErrorCode, NodeInfo, Snapshot};
+use synapsed_api::{NodeInfo, Snapshot};
 use synapsed_core::StateStore;
 use synapsed_ddc::{
-    DdcBackend, DdcClient, DdcTransport, InventoryWithOwnedHandles, OwnedEndpoint, VcpValue,
+    DdcClient, LazyDdc, VcpValue,
+    test_support::{FakeBackend, FakeEndpoint, FakeState, FakeStateHandle},
 };
 use synapsed_plugins::{
     CapabilityRegistry, PluginConfig, PluginHost, capabilities::ddc::DdcCapabilityFactory,
@@ -21,99 +23,57 @@ use synapsed_plugins::{
 use tempfile::TempDir;
 use uuid::Uuid;
 
-pub struct Hardware {
-    pub registers: BTreeMap<u8, VcpValue>,
-    pub failures: BTreeSet<u8>,
-    pub writes: Vec<(u8, u16)>,
-    pub coerce: Option<u16>,
-}
-impl Default for Hardware {
-    fn default() -> Self {
-        Self {
-            registers: BTreeMap::from([
-                (
-                    0x10,
-                    VcpValue {
-                        current: 40,
-                        maximum: 100,
-                    },
-                ),
-                (
-                    0x19,
-                    VcpValue {
-                        current: 2,
-                        maximum: 5,
-                    },
-                ),
-                (
-                    0xd7,
-                    VcpValue {
-                        current: 0x0120,
-                        maximum: 0x0231,
-                    },
-                ),
-                (
-                    0xd9,
-                    VcpValue {
-                        current: 0x0305,
-                        maximum: 0x070a,
-                    },
-                ),
-            ]),
-            failures: BTreeSet::new(),
-            writes: vec![],
-            coerce: None,
-        }
-    }
-}
-struct Backend(Arc<Mutex<Hardware>>);
-struct Transport(Arc<Mutex<Hardware>>);
-impl DdcBackend for Backend {
-    fn scan(&mut self) -> Result<InventoryWithOwnedHandles, ApiError> {
-        Ok(InventoryWithOwnedHandles {
-            endpoints: vec![OwnedEndpoint {
-                key: "isolated-native-key".into(),
-                manufacturer: Some("BNQ".into()),
-                product: Some(1),
-                product_name: Some("BenQ RD280U".into()),
-                identity: Some("a".repeat(64)),
-                transport: Box::new(Transport(self.0.clone())),
-            }],
-            errors: vec![],
-        })
-    }
-}
-impl DdcTransport for Transport {
-    fn get_vcp(&mut self, code: u8) -> Result<VcpValue, ApiError> {
-        let hardware = self.0.lock().unwrap();
-        if hardware.failures.contains(&code) {
-            return Err(ApiError::new(
-                ErrorCode::DdcError,
-                "Isolated transport read failed.",
-            ));
-        }
-        hardware
-            .registers
-            .get(&code)
-            .copied()
-            .ok_or_else(|| ApiError::new(ErrorCode::DdcError, "Isolated register is unavailable."))
-    }
-    fn set_vcp(&mut self, code: u8, value: u16) -> Result<(), ApiError> {
-        let mut hardware = self.0.lock().unwrap();
-        hardware.writes.push((code, value));
-        let observed = hardware.coerce.unwrap_or(value);
-        hardware
-            .registers
-            .get_mut(&code)
-            .ok_or_else(|| ApiError::new(ErrorCode::DdcError, "Isolated register is unavailable."))?
-            .current = observed;
-        Ok(())
-    }
+pub type Hardware = FakeStateHandle;
+fn fake_hardware() -> Hardware {
+    let endpoint = FakeEndpoint {
+        key: "isolated-native-key".into(),
+        manufacturer: Some("BNQ".into()),
+        product: Some(1),
+        product_name: Some("BenQ RD280U".into()),
+        identity: Some("a".repeat(64)),
+        replies: BTreeMap::from([
+            (
+                0x10,
+                VcpValue {
+                    current: 40,
+                    maximum: 100,
+                },
+            ),
+            (
+                0x19,
+                VcpValue {
+                    current: 2,
+                    maximum: 5,
+                },
+            ),
+            (
+                0xd7,
+                VcpValue {
+                    current: 0x0120,
+                    maximum: 0x0231,
+                },
+            ),
+            (
+                0xd9,
+                VcpValue {
+                    current: 0x0305,
+                    maximum: 0x070a,
+                },
+            ),
+        ]),
+    };
+    Arc::new(Mutex::new(FakeState {
+        endpoints: vec![endpoint],
+        ..FakeState::default()
+    }))
 }
 pub struct TestServer {
     pub server: RunningServer,
     pub http: reqwest::Client,
-    pub hardware: Arc<Mutex<Hardware>>,
+    pub hardware: Hardware,
+    pub logs: LogRing,
+    pub ddc: LazyDdc,
+    pub store: StateStore,
     pub directory: TempDir,
 }
 impl TestServer {
@@ -139,13 +99,16 @@ impl TestServer {
         snapshot
     }
     pub async fn wait_for(&self, predicate: impl Fn(&Snapshot) -> bool) -> Snapshot {
+        let mut changed = self.store.subscribe();
         tokio::time::timeout(Duration::from_secs(8), async {
             loop {
-                let snapshot = self.snapshot().await;
+                let snapshot = changed.borrow_and_update().clone();
                 if predicate(&snapshot) {
+                    let snapshot = snapshot.as_ref().clone();
+                    snapshot.validate().unwrap();
                     return snapshot;
                 }
-                tokio::time::sleep(Duration::from_millis(20)).await;
+                changed.changed().await.unwrap();
             }
         })
         .await
@@ -169,6 +132,9 @@ impl TestServer {
     }
 }
 pub async fn start(packages: &[&str]) -> TestServer {
+    start_with_heartbeat(packages, Duration::from_secs(30)).await
+}
+pub async fn start_with_heartbeat(packages: &[&str], heartbeat_interval: Duration) -> TestServer {
     let directory = tempfile::tempdir().unwrap();
     let plugins = directory.path().join("drivers");
     std::fs::create_dir(&plugins).unwrap();
@@ -183,15 +149,14 @@ pub async fn start(packages: &[&str]) -> TestServer {
             std::fs::copy(entry.path(), target.join(entry.file_name())).unwrap();
         }
     }
-    let hardware = Arc::new(Mutex::new(Hardware::default()));
+    let hardware = fake_hardware();
     let store = StateStore::new(NodeInfo {
         node_id: Uuid::new_v4().to_string(),
         instance_id: Uuid::new_v4().to_string(),
         name: "Isolated daemon".into(),
     })
     .unwrap();
-    let host = if packages.is_empty() {
-        // Exercise the same production lazy-native composition as the binary, with no hardware access.
+    let (host, ddc) = if packages.is_empty() {
         let paths = ConfigPaths {
             home: directory.path().into(),
             config_home: directory.path().into(),
@@ -206,14 +171,14 @@ pub async fn start(packages: &[&str]) -> TestServer {
         .unwrap();
         synapsed::start_plugins(store.clone(), &config).unwrap()
     } else {
-        // Only tests inject an in-memory transport, constructed on the real native owner thread.
         let backend = hardware.clone();
-        let client = DdcClient::start_with_backend(move || Ok(Backend(backend))).unwrap();
+        let client = DdcClient::start_with_backend(move || Ok(FakeBackend::new(backend))).unwrap();
+        let ddc = LazyDdc::with_client(client);
         let mut registry = CapabilityRegistry::default();
         registry
-            .register(Arc::new(DdcCapabilityFactory::new(client)))
+            .register(Arc::new(DdcCapabilityFactory::with_shared(ddc.clone())))
             .unwrap();
-        PluginHost::start(
+        let host = PluginHost::start(
             store.clone(),
             PluginConfig {
                 directory: plugins,
@@ -224,9 +189,24 @@ pub async fn start(packages: &[&str]) -> TestServer {
             },
             registry,
         )
-        .unwrap()
+        .unwrap();
+        (host, ddc)
     };
-    let application = Application::new(store, host, LogRing::new(false));
+    let logs = LogRing::new(false);
+    let inventory = Sources::with_sysfs_root(
+        store.clone(),
+        ddc.clone(),
+        host.bindings(),
+        host.catalog(),
+        directory.path().join("empty-sysfs"),
+    );
+    let application = Application::new_with_heartbeat_interval(
+        store.clone(),
+        host,
+        logs.clone(),
+        inventory,
+        heartbeat_interval,
+    );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let server =
         RunningServer::start(listener, application, vec!["http://localhost:3000".into()]).unwrap();
@@ -234,6 +214,9 @@ pub async fn start(packages: &[&str]) -> TestServer {
         server,
         http: reqwest::Client::new(),
         hardware,
+        logs,
+        ddc,
+        store,
         directory,
     }
 }

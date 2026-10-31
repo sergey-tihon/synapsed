@@ -2,34 +2,36 @@
 
 ## Architecture and ownership
 
-Synapsed has one Rust user daemon, external trusted Lua drivers and metadata-driven local clients. Rust owns native transports, endpoint leases and lifecycle; Lua declares devices/characteristics and implements hardware policy. Clients use the generated device-neutral HTTP/WebSocket contract and never acquire hardware. New drivers using existing capabilities deploy without a host/client rebuild; new transports require a Rust capability implementation.
+Synapsed has one Rust user daemon, external trusted Lua drivers and metadata-driven local clients. Rust owns native transports, endpoint leases and lifecycle; Lua declares devices/characteristics and implements hardware policy. Clients use the generated device-neutral HTTP/WebSocket contract and never acquire hardware. The separate `synapsed-inventory` crate passively collects OS hardware records and derives a privacy-bounded topology; the daemon merges it with its existing DDC scan cache and driver bindings. New drivers using existing capabilities deploy without a host/client rebuild; new transports require a Rust capability implementation.
 
-See the [repository ownership/dependency map](docs/specs/0000-repository.md), [Lua contract](docs/specs/0001-lua-device-plugins.md), [client contract](docs/specs/0002-local-clients.md), [ADRs](docs/adr/) and [BenQ evidence/limits](docs/hardware/benq-rd280u.md). Reserved BLE, security-device, system-metric, Omarchy/agent, network and Home Assistant areas are not delivered integrations.
+See the [repository ownership/dependency map](docs/specs/0000-repository.md), [Lua contract](docs/specs/0001-lua-device-plugins.md), [client contract](docs/specs/0002-local-clients.md), [ADRs](docs/adr/) and [BenQ evidence/limits](docs/hardware/benq-rd280u.md). Reserved BLE, security-device, system-metric, agent, network and Home Assistant areas are not delivered integrations.
 
 ## Toolchain and repository commands
 
-Use Node.js 24+, npm and Rust 1.90+. Keep the canonical root `package-lock.json` and `Cargo.lock`; do not add nested dependency locks. Supported native build hosts are Apple Silicon macOS and Linux x86_64/aarch64. macOS needs the Apple SDK/Xcode Command Line Tools; the build selector sets `MACOSX_DEPLOYMENT_TARGET=12.0`. The macOS-only tray is excluded from Linux Cargo test selection. Raycast's current app requires Apple Silicon/macOS Tahoe and a signed-in account; its host runtime is separate from developer Node.
+Use Node.js 24+, npm and Rust 1.90+. Keep the canonical root `package-lock.json` and `Cargo.lock`; do not add nested dependency locks. Supported native build hosts are Apple Silicon macOS and Linux x86_64. macOS needs the Apple SDK/Xcode Command Line Tools; the build selector sets `MACOSX_DEPLOYMENT_TARGET=12.0`. The macOS-only tray is excluded from Linux Cargo test selection. Raycast's current app requires Apple Silicon/macOS Tahoe and a signed-in account; its host runtime is separate from developer Node.
 
 From the repository root:
 
 ```sh
-rustup component add rustfmt
+rustup component add rustfmt clippy
 npm ci
 npm run format        # cargo fmt, Prettier and StyLua; writes source formatting
 npm run format:check  # checks all three without rewriting
 npm run audit         # production npm dependencies across all workspaces and root
 npm test
 npm run validate      # macOS: Stream Deck manifest/assets
-npm run lint:raycast  # full SDK lint, manifest/account and root-lock validation
-npm run smoke         # isolated no-package daemon/CLI/HTTP/WebSocket smoke
+`npm run lint`      # Rust Clippy and web/Stream Deck TypeScript checks
+`npm run lint:raycast`  # full SDK lint, manifest/account and root-lock validation
+`npm run smoke`     # isolated no-package daemon/CLI/HTTP/WebSocket smoke
 npm run pack
 ```
 
 Install Rustfmt with `rustup component add rustfmt`; `npm ci` installs the pinned Prettier and StyLua development dependencies. Formatting excludes generated/vendor/build output. `npm run audit` runs `npm audit --workspaces --include-workspace-root --omit=dev`; it is not a Rust security audit.
 
 Address audit advisories with targeted compatible dependency updates or explicit root overrides, updating the canonical lockfile and checking affected builds/native tooling. Keep intentional SDK and Solid RC pins unless a coordinated change is required. Do not run `npm audit fix --force` or silence findings instead of resolving them.
+The root pins and overrides `@solidjs/babel-plugin` and `@solidjs/compiler` to match the Solid web runtime RC; changing these together avoids dev compiler output importing helpers absent from the pinned runtime.
 
-`npm test` builds the daemon/CLI/embedded web and, on macOS, native clients; checks generated-schema drift; runs locked platform-selected Cargo suites and TS transport/parser tests. `npm run api:generate` deliberately updates checked-in schemas/types/standalone validators. `npm run api:check` compares regenerated output without rewriting included files. Tests do not require physical monitor writes.
+`npm test` builds the daemon/CLI/embedded web and, on macOS, native clients; checks generated-schema drift; runs locked platform-selected Cargo suites, TS transport/parser tests and the pure Omarchy model tests. `npm run api:generate` deliberately updates checked-in schemas/types/standalone validators. `npm run api:check` compares regenerated output without rewriting included files. Tests do not require physical monitor writes.
 
 ## Daemon, CLI and embedded web from source
 
@@ -37,7 +39,8 @@ Address audit advisories with targeted compatible dependency updates or explicit
 npm run build:server  # shared client + static web, then locked native Cargo build
 ```
 
-The binaries are under `target/<native-rust-target>/debug/`, where the target is `aarch64-apple-darwin`, `x86_64-unknown-linux-gnu` or `aarch64-unknown-linux-gnu`. If Cargo's target directory is customized, use that directory instead. The web build produces `apps/web/dist/client`, embedded into the daemon; missing assets are a build error, not a placeholder. There is no production Node server or runtime CDN.
+The binaries are under `target/<native-rust-target>/debug/`, where the target is `aarch64-apple-darwin` or `x86_64-unknown-linux-gnu`. If Cargo's target directory is customized, use that directory instead. The web build produces `apps/web/dist/client`, embedded into the daemon; missing assets are a build error, not a placeholder. There is no production Node server or runtime CDN.
+The separate Hardware view reads passive USB, Thunderbolt and Bluetooth sources plus the DDC owner's last completed scan. `GET /api/v1/inventory` is read-only, reports each source outcome independently and does not start DDC discovery or write hardware.
 
 Create a development config at a chosen absolute path (replace `/absolute/path/to/synapsed` with your checkout):
 
@@ -57,6 +60,13 @@ discovery_interval_ms = 5000
 target/aarch64-apple-darwin/debug/synapsed --config /absolute/path/to/dev-config.toml
 target/aarch64-apple-darwin/debug/synapsectl --endpoint http://127.0.0.1:24817 --json devices
 target/aarch64-apple-darwin/debug/synapsectl --endpoint http://127.0.0.1:24817 watch
+```
+
+```sh
+# Linux x86_64 example:
+target/x86_64-unknown-linux-gnu/debug/synapsed --config /absolute/path/to/dev-config.toml
+target/x86_64-unknown-linux-gnu/debug/synapsectl --endpoint http://127.0.0.1:24817 --json devices
+target/x86_64-unknown-linux-gnu/debug/synapsectl --endpoint http://127.0.0.1:24817 watch
 ```
 
 Using checkout drivers accesses real hardware. For hardware-free exploration select an existing empty temporary directory instead; an empty catalog must not start native DDC discovery. Never run this daemon alongside another hardware writer on the same monitor. Packages and private settings load only at startup: restart after Lua/manifest/settings/install/remove/disable changes. No embedded driver defaults or hot reload exist.
@@ -131,9 +141,23 @@ Open Devices and set its sole loopback Endpoint preference. Shared-client edits 
 
 `apps/raycast/scripts/run-ray.mjs` invokes fixed SDK commands without a shell. For hoisted dependencies it creates only an ignored missing `tsc` symlink. During lint only, it temporarily aliases the canonical root lockfile where the SDK expects it and removes its own alias afterward; unexpected existing files are not overwritten. Builds run the real production TypeScript path. `.rayext` is an SDK artifact, not a promise of double-click installation or Store submission; publishing is never automatic.
 
+## Omarchy widget from source
+
+The widget uses the installed `synapsectl` CLI and lives outside the npm/Cargo workspaces. Copy the QML, pure model and generated brand glyph into the Omarchy plugin directory; the shell hot-reloads it:
+
+```sh
+mkdir -p ~/.config/omarchy/plugins/sergey-tihon.synapsed
+cp apps/omarchy/manifest.json apps/omarchy/Widget.qml apps/omarchy/Model.js apps/omarchy/BrandGlyph.qml ~/.config/omarchy/plugins/sergey-tihon.synapsed/
+omarchy plugin validate ~/.config/omarchy/plugins/sergey-tihon.synapsed
+omarchy plugin enable sergey-tihon.synapsed
+qs log -p /usr/share/omarchy/shell -t 200
+```
+
+Use the Linux user installer to install daemon binaries, drivers, the service template and packaged widget. It does not enable the service or change device permissions. The widget invokes only fixed `synapsectl` argv and never opens a daemon socket or touches hardware.
+
 ## Packaging and release notes
 
-`npm run build` selects current-host components; `npm run pack` creates current-host archives and SHA-256 checksums under `dist/`. Daemon archives include binaries, complete external driver folders, deployment templates/examples, docs and both license texts. macOS adds Stream Deck, tray and Raycast artifacts. Follow the [README installation/service instructions](README.md) to deploy explicitly; builds do not enable services or copy drivers into your home directory.
+`npm run build` selects current-host components; `npm run pack` creates current-host archives and SHA-256 checksums under `dist/`. Linux daemon archives include binaries, complete external driver folders, the `omarchy/` widget, deployment templates/examples, docs and both license texts. macOS adds Stream Deck, tray and Raycast artifacts. Use `deploy/systemd/install.sh` to install Linux archives as a non-root desktop user; it leaves the service stopped and never changes device permissions. Follow the [README installation/service instructions](README.md) to deploy explicitly; builds do not enable services or copy drivers into your home directory.
 
 Stream Deck packaging runs the SDK against a staged bundle without logs. The SDK may rewrite that staged manifest; the formatted source manifest remains unchanged.
 

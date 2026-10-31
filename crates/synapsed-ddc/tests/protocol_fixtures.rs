@@ -1,17 +1,17 @@
 //! Hardware-free checks against the actual owner. No test launches a native platform backend.
 use std::{
     collections::{BTreeMap, BTreeSet},
-    rc::Rc,
-    sync::{Arc, Condvar, Mutex},
-    thread::{self, ThreadId},
+    future::Future,
+    sync::{Arc, Mutex},
+    task::Poll,
+    thread,
     time::{Duration, Instant},
 };
 use synapsed_core::{DeviceGrant, EndpointGates, OperationContext};
-use synapsed_ddc::{
-    DdcBackend, DdcClient, DdcTransport, DriverError, EndpointToken, ErrorCode,
-    InventoryWithOwnedHandles, OwnedEndpoint, VcpValue, protocol,
+use synapsed_ddc::test_support::{
+    FakeBackend, FakeBarrier, FakeEndpoint, FakeState, FakeStateHandle,
 };
-use tokio::sync::oneshot;
+use synapsed_ddc::{DdcClient, DriverError, EndpointToken, ErrorCode, VcpValue, protocol};
 
 fn deadline() -> Instant {
     Instant::now() + Duration::from_secs(5)
@@ -136,138 +136,20 @@ fn protocol_fixtures_linux_adapter_exclusions() {
     }
 }
 
-struct NativeBarrier {
-    entered: Mutex<Option<oneshot::Sender<()>>>,
-    released: Mutex<bool>,
-    release: Condvar,
-}
-impl NativeBarrier {
-    fn new() -> (Arc<Self>, oneshot::Receiver<()>) {
-        let (sender, receiver) = oneshot::channel();
-        (
-            Arc::new(Self {
-                entered: Mutex::new(Some(sender)),
-                released: Mutex::new(false),
-                release: Condvar::new(),
-            }),
-            receiver,
-        )
-    }
-    fn block(&self) {
-        if let Some(sender) = self.entered.lock().unwrap().take() {
-            let _ = sender.send(());
-        }
-        let mut released = self.released.lock().unwrap();
-        while !*released {
-            released = self.release.wait(released).unwrap();
-        }
-    }
-    fn unblock(&self) {
-        *self.released.lock().unwrap() = true;
-        self.release.notify_all();
-    }
-}
-struct ReleaseOnDrop(Arc<NativeBarrier>);
+struct ReleaseOnDrop(FakeBarrier);
 impl Drop for ReleaseOnDrop {
     fn drop(&mut self) {
-        self.0.unblock();
+        self.0.open();
     }
 }
-#[derive(Default)]
-struct Machine {
-    endpoints: Vec<(String, Option<String>)>,
-    errors: Vec<DriverError>,
-    scan_error: Option<DriverError>,
-    registers: BTreeMap<u8, VcpValue>,
-    gets: Vec<u8>,
-    sets: Vec<(u8, u16)>,
-    failed_get: Option<u8>,
-    failed_set: bool,
-    coerced: Option<u16>,
-    barrier: Option<Arc<NativeBarrier>>,
-    owner: Option<ThreadId>,
-    destroyed_on: Option<ThreadId>,
-}
-struct Backend {
-    machine: Arc<Mutex<Machine>>,
-    _not_send: Rc<()>,
-}
-impl DdcBackend for Backend {
-    fn scan(&mut self) -> Result<InventoryWithOwnedHandles, DriverError> {
-        let machine = self.machine.lock().unwrap();
-        assert_eq!(machine.owner, Some(thread::current().id()));
-        if let Some(error) = &machine.scan_error {
-            return Err(error.clone());
-        }
-        let endpoints = machine
-            .endpoints
-            .iter()
-            .map(|(key, identity)| OwnedEndpoint {
-                key: key.clone(),
-                manufacturer: Some("BNQ".into()),
-                product: Some(0x1234),
-                product_name: None,
-                identity: identity.clone(),
-                transport: Box::new(Transport {
-                    machine: self.machine.clone(),
-                    _not_send: Rc::new(()),
-                }),
-            })
-            .collect();
-        Ok(InventoryWithOwnedHandles {
-            endpoints,
-            errors: machine.errors.clone(),
-        })
-    }
-}
-impl Drop for Backend {
-    fn drop(&mut self) {
-        self.machine.lock().unwrap().destroyed_on = Some(thread::current().id());
-    }
-}
-struct Transport {
-    machine: Arc<Mutex<Machine>>,
-    _not_send: Rc<()>,
-}
-impl DdcTransport for Transport {
-    fn get_vcp(&mut self, code: u8) -> Result<VcpValue, DriverError> {
-        let mut machine = self.machine.lock().unwrap();
-        assert_eq!(machine.owner, Some(thread::current().id()));
-        machine.gets.push(code);
-        if machine.failed_get == Some(code) {
-            return Err(error(ErrorCode::DdcError));
-        }
-        machine
-            .registers
-            .get(&code)
-            .copied()
-            .ok_or_else(|| error(ErrorCode::DdcError))
-    }
-    fn set_vcp(&mut self, code: u8, value: u16) -> Result<(), DriverError> {
-        let barrier = {
-            let mut machine = self.machine.lock().unwrap();
-            assert_eq!(machine.owner, Some(thread::current().id()));
-            machine.sets.push((code, value));
-            if machine.failed_set {
-                return Err(error(ErrorCode::DdcError));
-            }
-            let value = machine.coerced.unwrap_or(value);
-            machine.registers.get_mut(&code).unwrap().current = value;
-            machine.barrier.clone()
-        };
-        if let Some(barrier) = barrier {
-            barrier.block();
-        }
-        Ok(())
-    }
-}
-fn machine() -> (DdcClient, Arc<Mutex<Machine>>) {
-    let machine = Arc::new(Mutex::new(Machine {
-        endpoints: vec![(
-            "native-path-never-exported".into(),
-            Some("identity-a".into()),
-        )],
-        registers: BTreeMap::from([
+fn fake_endpoint(key: &str, identity: Option<&str>) -> FakeEndpoint {
+    FakeEndpoint {
+        key: key.into(),
+        manufacturer: Some("BNQ".into()),
+        product: Some(0x1234),
+        product_name: None,
+        identity: identity.map(str::to_owned),
+        replies: BTreeMap::from([
             (
                 0x10,
                 VcpValue {
@@ -283,18 +165,51 @@ fn machine() -> (DdcClient, Arc<Mutex<Machine>>) {
                 },
             ),
         ]),
-        ..Machine::default()
+    }
+}
+fn machine() -> (DdcClient, FakeStateHandle) {
+    let machine = Arc::new(Mutex::new(FakeState {
+        endpoints: vec![fake_endpoint(
+            "native-path-never-exported",
+            Some("identity-a"),
+        )],
+        ..FakeState::default()
     }));
     let owner_machine = machine.clone();
-    let client = DdcClient::start_with_backend(move || {
-        owner_machine.lock().unwrap().owner = Some(thread::current().id());
-        Ok(Backend {
-            machine: owner_machine,
-            _not_send: Rc::new(()),
-        })
-    })
-    .unwrap();
+    let client =
+        DdcClient::start_with_backend(move || Ok(FakeBackend::new(owner_machine))).unwrap();
     (client, machine)
+}
+fn get_codes(machine: &FakeStateHandle) -> Vec<u8> {
+    machine
+        .lock()
+        .unwrap()
+        .get_calls
+        .iter()
+        .map(|(_, code)| *code)
+        .collect()
+}
+fn set_pairs(machine: &FakeStateHandle) -> Vec<(u8, u16)> {
+    machine
+        .lock()
+        .unwrap()
+        .set_calls
+        .iter()
+        .map(|(_, code, value)| (*code, *value))
+        .collect()
+}
+async fn assert_pending<T>(future: impl Future<Output = T>) {
+    let mut future = Box::pin(future);
+    std::future::poll_fn(|context| {
+        assert!(future.as_mut().poll(context).is_pending());
+        Poll::Ready(())
+    })
+    .await;
+}
+fn block_next_set(machine: &FakeStateHandle) -> FakeBarrier {
+    let barrier = machine.lock().unwrap().set_barrier.clone();
+    barrier.arm();
+    barrier
 }
 fn grant(endpoint: EndpointToken) -> DeviceGrant {
     EndpointGates::default()
@@ -317,12 +232,12 @@ async fn protocol_fixtures_native_owner_no_autonomous_probes_and_permissions() {
     machine
         .lock()
         .unwrap()
-        .errors
+        .scan_errors
         .push(error(ErrorCode::PermissionDenied));
     let inventory = client.enumerate().await.unwrap();
     assert_eq!(inventory.endpoints.len(), 1);
     assert_eq!(inventory.errors[0].code, ErrorCode::PermissionDenied);
-    assert!(machine.lock().unwrap().gets.is_empty());
+    assert!(get_codes(&machine).is_empty());
     let encoded = serde_json::to_string(&inventory).unwrap();
     assert!(!encoded.contains("native-path-never-exported"));
     assert!(!encoded.contains("serial"));
@@ -350,19 +265,19 @@ async fn protocol_fixtures_native_owner_no_autonomous_probes_and_permissions() {
             .code,
         ErrorCode::PermissionDenied
     );
-    assert!(machine.lock().unwrap().sets.is_empty());
+    assert!(set_pairs(&machine).is_empty());
     context.finish();
     client.shutdown(deadline()).await.unwrap();
     let machine = machine.lock().unwrap();
-    assert_eq!(machine.owner, machine.destroyed_on);
-    assert_ne!(machine.owner, Some(thread::current().id()));
+    assert_eq!(machine.backend_created_on, machine.backend_dropped_on);
+    assert_ne!(machine.backend_created_on, Some(thread::current().id()));
 }
 #[tokio::test]
 async fn protocol_fixtures_generation_removal_identity_and_failed_scan() {
     let (client, machine) = machine();
     let first = client.enumerate().await.unwrap().endpoints[0].token;
     assert_eq!(client.enumerate().await.unwrap().endpoints[0].token, first);
-    machine.lock().unwrap().endpoints[0].1 = Some("identity-b".into());
+    machine.lock().unwrap().endpoints[0].identity = Some("identity-b".into());
     let changed = client.enumerate().await.unwrap().endpoints[0].token;
     assert_eq!(changed.id, first.id);
     assert!(changed.generation > first.generation);
@@ -383,17 +298,86 @@ async fn protocol_fixtures_generation_removal_identity_and_failed_scan() {
         .lock()
         .unwrap()
         .endpoints
-        .push(("native-path-never-exported".into(), None));
+        .push(fake_endpoint("native-path-never-exported", None));
     let reconnected = client.enumerate().await.unwrap().endpoints[0].token;
     assert!(reconnected.generation > changed.generation);
-    machine.lock().unwrap().scan_error = Some(error(ErrorCode::PermissionDenied));
+    machine.lock().unwrap().scan_failure = Some(error(ErrorCode::PermissionDenied));
     assert_eq!(
         client.enumerate().await.unwrap_err().code,
         ErrorCode::PermissionDenied
     );
-    machine.lock().unwrap().scan_error = None;
+    machine.lock().unwrap().scan_failure = None;
     let after_error = client.enumerate().await.unwrap().endpoints[0].token;
     assert!(after_error.generation > reconnected.generation);
+    client.shutdown(deadline()).await.unwrap();
+}
+
+#[tokio::test]
+async fn protocol_fixtures_owner_rejects_endpoint_inventory_over_limit() {
+    let state = Arc::new(Mutex::new(FakeState {
+        endpoints: (0..257)
+            .map(|index| fake_endpoint(&format!("endpoint-{index}"), None))
+            .collect(),
+        ..FakeState::default()
+    }));
+    let owner_state = state.clone();
+    let client = DdcClient::start_with_backend(move || Ok(FakeBackend::new(owner_state))).unwrap();
+    assert_eq!(client.enumerate().await.unwrap_err().code, ErrorCode::Busy);
+    client.shutdown(deadline()).await.unwrap();
+}
+
+#[tokio::test]
+async fn protocol_fixtures_owner_rejects_endpoint_history_over_limit() {
+    let state = Arc::new(Mutex::new(FakeState::default()));
+    let owner_state = state.clone();
+    let client = DdcClient::start_with_backend(move || Ok(FakeBackend::new(owner_state))).unwrap();
+    for batch in 0..16 {
+        state.lock().unwrap().endpoints = (0..256)
+            .map(|index| fake_endpoint(&format!("endpoint-{batch}-{index}"), None))
+            .collect();
+        assert_eq!(client.enumerate().await.unwrap().endpoints.len(), 256);
+    }
+    state.lock().unwrap().endpoints = vec![fake_endpoint("history-overflow", None)];
+    assert_eq!(client.enumerate().await.unwrap_err().code, ErrorCode::Busy);
+    client.shutdown(deadline()).await.unwrap();
+}
+
+#[tokio::test]
+async fn protocol_fixtures_factory_error_is_reported_to_every_request() {
+    let factory_error = error(ErrorCode::PermissionDenied);
+    let client =
+        DdcClient::start_with_backend::<FakeBackend, _>(move || Err(factory_error)).unwrap();
+    for _ in 0..3 {
+        assert_eq!(
+            client.enumerate().await.unwrap_err().code,
+            ErrorCode::PermissionDenied
+        );
+    }
+    let endpoint = EndpointToken {
+        id: u64::MAX,
+        generation: 1,
+    };
+    let grant = grant(endpoint);
+    let read = transaction(&grant, 0xffff).await;
+    assert_eq!(
+        client
+            .get_vcp(read.clone(), endpoint, 0x10)
+            .await
+            .unwrap_err()
+            .code,
+        ErrorCode::PermissionDenied
+    );
+    read.finish();
+    let write = transaction(&grant, 0xffff).await;
+    assert_eq!(
+        client
+            .set_vcp(write.clone(), endpoint, 0x10, 50)
+            .await
+            .unwrap_err()
+            .code,
+        ErrorCode::PermissionDenied
+    );
+    write.finish();
     client.shutdown(deadline()).await.unwrap();
 }
 #[tokio::test]
@@ -422,15 +406,15 @@ async fn protocol_fixtures_fresh_read_mask_and_observed_not_requested() {
             .code,
         ErrorCode::PermissionDenied
     );
-    assert!(machine.lock().unwrap().sets.is_empty());
-    machine.lock().unwrap().coerced = Some(0x0230);
+    assert!(set_pairs(&machine).is_empty());
+    machine.lock().unwrap().coercion.insert(0xd7, 0x0230);
     let observed = client
         .set_vcp(context.clone(), endpoint, 0xd7, 0x0220)
         .await
         .unwrap();
     assert_eq!(observed.current, 0x0230);
     assert_eq!(context.outcomes()[0].observed, Some((0x0230, 0x0231)));
-    assert_eq!(machine.lock().unwrap().sets, [(0xd7, 0x0220)]);
+    assert_eq!(set_pairs(&machine), [(0xd7, 0x0220)]);
     context.finish();
     let next = transaction(&grant, 0xff00).await;
     assert_eq!(
@@ -461,8 +445,8 @@ async fn protocol_fixtures_failed_fresh_get_unchanged_cancel_and_revocation() {
             .unwrap(),
         value
     );
-    assert!(machine.lock().unwrap().sets.is_empty());
-    machine.lock().unwrap().failed_get = Some(0x10);
+    assert!(set_pairs(&machine).is_empty());
+    machine.lock().unwrap().fail_reads.insert(0x10);
     assert_eq!(
         client
             .get_vcp(context.clone(), endpoint, 0x10)
@@ -479,7 +463,7 @@ async fn protocol_fixtures_failed_fresh_get_unchanged_cancel_and_revocation() {
             .code,
         ErrorCode::PermissionDenied
     );
-    machine.lock().unwrap().failed_get = None;
+    machine.lock().unwrap().fail_reads.remove(&0x10);
     client
         .get_vcp(context.clone(), endpoint, 0x10)
         .await
@@ -509,7 +493,7 @@ async fn protocol_fixtures_failed_fresh_get_unchanged_cancel_and_revocation() {
         ErrorCode::DeviceUnavailable
     );
     revoked.finish();
-    assert!(machine.lock().unwrap().sets.is_empty());
+    assert!(set_pairs(&machine).is_empty());
     client.shutdown(deadline()).await.unwrap();
 }
 #[tokio::test]
@@ -522,7 +506,7 @@ async fn protocol_fixtures_failed_set_and_failed_readback_record_no_fake_observa
         .get_vcp(context.clone(), endpoint, 0x10)
         .await
         .unwrap();
-    machine.lock().unwrap().failed_set = true;
+    machine.lock().unwrap().fail_writes.insert(0x10);
     assert_eq!(
         client
             .set_vcp(context.clone(), endpoint, 0x10, 50)
@@ -536,13 +520,16 @@ async fn protocol_fixtures_failed_set_and_failed_readback_record_no_fake_observa
         context.outcomes()[0].error.as_ref().unwrap().code,
         ErrorCode::DdcError
     );
-    assert_eq!(machine.lock().unwrap().registers[&0x10].current, 40);
-    machine.lock().unwrap().failed_set = false;
+    assert_eq!(
+        machine.lock().unwrap().endpoints[0].replies[&0x10].current,
+        40
+    );
+    machine.lock().unwrap().fail_writes.remove(&0x10);
     client
         .get_vcp(context.clone(), endpoint, 0x10)
         .await
         .unwrap();
-    machine.lock().unwrap().failed_get = Some(0x10);
+    machine.lock().unwrap().fail_reads.insert(0x10);
     assert_eq!(
         client
             .set_vcp(context.clone(), endpoint, 0x10, 60)
@@ -556,7 +543,10 @@ async fn protocol_fixtures_failed_set_and_failed_readback_record_no_fake_observa
         context.outcomes()[1].error.as_ref().unwrap().code,
         ErrorCode::DdcError
     );
-    assert_eq!(machine.lock().unwrap().registers[&0x10].current, 60);
+    assert_eq!(
+        machine.lock().unwrap().endpoints[0].replies[&0x10].current,
+        60
+    );
     context.finish();
     client.shutdown(deadline()).await.unwrap();
 }
@@ -570,13 +560,9 @@ async fn protocol_fixtures_abandoned_started_set_drains_gate_and_records_readbac
         .get_vcp(context.clone(), endpoint, 0x10)
         .await
         .unwrap();
-    let (barrier, entered) = NativeBarrier::new();
+    let barrier = block_next_set(&machine);
     let _release_on_panic = ReleaseOnDrop(barrier.clone());
-    {
-        let mut machine = machine.lock().unwrap();
-        machine.barrier = Some(barrier.clone());
-        machine.coerced = Some(55);
-    }
+    machine.lock().unwrap().coercion.insert(0x10, 55);
     let operation_client = client.clone();
     let operation_context = context.clone();
     let operation = tokio::spawn(async move {
@@ -584,19 +570,14 @@ async fn protocol_fixtures_abandoned_started_set_drains_gate_and_records_readbac
             .set_vcp(operation_context, endpoint, 0x10, 60)
             .await
     });
-    tokio::time::timeout(Duration::from_secs(1), entered)
+    tokio::time::timeout(Duration::from_secs(1), barrier.wait_until_entered())
         .await
-        .unwrap()
         .unwrap();
     operation.abort();
     let _ = operation.await;
     context.cancel();
     context.finish();
-    assert!(
-        tokio::time::timeout(Duration::from_millis(20), transaction(&grant, 0xffff))
-            .await
-            .is_err()
-    );
+    assert_pending(transaction(&grant, 0xffff)).await;
     assert_eq!(
         client
             .shutdown(Instant::now() + Duration::from_millis(20))
@@ -605,16 +586,15 @@ async fn protocol_fixtures_abandoned_started_set_drains_gate_and_records_readbac
             .code,
         ErrorCode::Timeout
     );
-    barrier.unblock();
+    barrier.open();
     client.shutdown(deadline()).await.unwrap();
     let outcomes = context.outcomes();
     assert_eq!(outcomes.len(), 1);
     assert_eq!(outcomes[0].requested, 60);
     assert_eq!(outcomes[0].observed, Some((55, 100)));
     assert_eq!(outcomes[0].error.as_ref().unwrap().code, ErrorCode::Timeout);
-    let machine = machine.lock().unwrap();
-    assert_eq!(machine.sets, [(0x10, 60)]);
-    assert_eq!(machine.gets, [0x10, 0x10]);
+    assert_eq!(set_pairs(&machine), [(0x10, 60)]);
+    assert_eq!(get_codes(&machine), [0x10, 0x10]);
 }
 
 #[tokio::test]
@@ -625,7 +605,7 @@ async fn protocol_fixtures_queued_cancellation_before_first_native_set() {
         .lock()
         .unwrap()
         .endpoints
-        .push(("second-native-key".into(), Some("identity-c".into())));
+        .push(fake_endpoint("second-native-key", Some("identity-c")));
     let endpoints = client.enumerate().await.unwrap().endpoints;
     let first = endpoints[0].token;
     let second = endpoints[1].token;
@@ -641,16 +621,14 @@ async fn protocol_fixtures_queued_cancellation_before_first_native_set() {
         .get_vcp(second_context.clone(), second, 0x10)
         .await
         .unwrap();
-    let (barrier, entered) = NativeBarrier::new();
+    let barrier = block_next_set(&machine);
     let _release_on_panic = ReleaseOnDrop(barrier.clone());
-    machine.lock().unwrap().barrier = Some(barrier.clone());
     let worker_client = client.clone();
     let worker_context = first_context.clone();
     let started =
         tokio::spawn(async move { worker_client.set_vcp(worker_context, first, 0x10, 50).await });
-    tokio::time::timeout(Duration::from_secs(1), entered)
+    tokio::time::timeout(Duration::from_secs(1), barrier.wait_until_entered())
         .await
-        .unwrap()
         .unwrap();
     let mut queued = Box::pin(client.set_vcp(second_context.clone(), second, 0x10, 60));
     std::future::poll_fn(|cx| {
@@ -660,12 +638,12 @@ async fn protocol_fixtures_queued_cancellation_before_first_native_set() {
     .await;
     assert!(second_context.abandon());
     second_context.finish();
-    barrier.unblock();
+    barrier.open();
     assert_eq!(queued.await.unwrap_err().code, ErrorCode::Timeout);
     assert_eq!(started.await.unwrap().unwrap().current, 50);
     first_context.finish();
     client.shutdown(deadline()).await.unwrap();
-    assert_eq!(machine.lock().unwrap().sets, [(0x10, 50)]);
+    assert_eq!(set_pairs(&machine), [(0x10, 50)]);
     assert!(second_context.outcomes().is_empty());
 }
 
@@ -680,9 +658,8 @@ async fn protocol_fixtures_bounded_nonblocking_queue_and_closed_owner() {
         .get_vcp(context.clone(), endpoint, 0x10)
         .await
         .unwrap();
-    let (barrier, entered) = NativeBarrier::new();
+    let barrier = block_next_set(&machine);
     let _release_on_panic = ReleaseOnDrop(barrier.clone());
-    machine.lock().unwrap().barrier = Some(barrier.clone());
     let worker_client = client.clone();
     let worker_context = context.clone();
     let started = tokio::spawn(async move {
@@ -690,9 +667,8 @@ async fn protocol_fixtures_bounded_nonblocking_queue_and_closed_owner() {
             .set_vcp(worker_context, endpoint, 0x10, 50)
             .await
     });
-    tokio::time::timeout(Duration::from_secs(1), entered)
+    tokio::time::timeout(Duration::from_secs(1), barrier.wait_until_entered())
         .await
-        .unwrap()
         .unwrap();
     let mut pending = Vec::new();
     for _ in 0..64 {
@@ -714,7 +690,7 @@ async fn protocol_fixtures_bounded_nonblocking_queue_and_closed_owner() {
     );
     drop(pending);
     context.finish();
-    barrier.unblock();
+    barrier.open();
     assert_eq!(started.await.unwrap().unwrap().current, 50);
     client.shutdown(deadline()).await.unwrap();
     assert_eq!(
@@ -722,7 +698,7 @@ async fn protocol_fixtures_bounded_nonblocking_queue_and_closed_owner() {
         ErrorCode::DeviceUnavailable
     );
     assert_eq!(context.outcomes()[0].observed, Some((50, 100)));
-    assert_eq!(machine.lock().unwrap().sets, [(0x10, 50)]);
+    assert_eq!(set_pairs(&machine), [(0x10, 50)]);
 }
 
 #[tokio::test]
@@ -735,9 +711,8 @@ async fn protocol_fixtures_receiver_loss_after_admission_keeps_healthy_confirmat
         .get_vcp(context.clone(), endpoint, 0x10)
         .await
         .unwrap();
-    let (barrier, entered) = NativeBarrier::new();
+    let barrier = block_next_set(&machine);
     let _release_on_panic = ReleaseOnDrop(barrier.clone());
-    machine.lock().unwrap().barrier = Some(barrier.clone());
     let worker_client = client.clone();
     let worker_context = context.clone();
     let started = tokio::spawn(async move {
@@ -745,14 +720,13 @@ async fn protocol_fixtures_receiver_loss_after_admission_keeps_healthy_confirmat
             .set_vcp(worker_context, endpoint, 0x10, 50)
             .await
     });
-    tokio::time::timeout(Duration::from_secs(1), entered)
+    tokio::time::timeout(Duration::from_secs(1), barrier.wait_until_entered())
         .await
-        .unwrap()
         .unwrap();
     started.abort();
     let _ = started.await;
     assert!(!context.abandon());
-    barrier.unblock();
+    barrier.open();
     // The next read is a real confirming observation in the healthy, still-live transaction.
     let confirmed = client
         .get_vcp(context.clone(), endpoint, 0x10)
@@ -782,9 +756,8 @@ async fn protocol_fixtures_overall_deadline_denies_result_but_drains_admitted_re
         .get_vcp(context.clone(), endpoint, 0x10)
         .await
         .unwrap();
-    let (barrier, entered) = NativeBarrier::new();
+    let barrier = block_next_set(&machine);
     let _release_on_panic = ReleaseOnDrop(barrier.clone());
-    machine.lock().unwrap().barrier = Some(barrier.clone());
     let worker_client = client.clone();
     let worker_context = context.clone();
     let started = tokio::spawn(async move {
@@ -792,26 +765,21 @@ async fn protocol_fixtures_overall_deadline_denies_result_but_drains_admitted_re
             .set_vcp(worker_context, endpoint, 0x10, 50)
             .await
     });
-    tokio::time::timeout(Duration::from_secs(1), entered)
+    tokio::time::timeout(Duration::from_secs(1), barrier.wait_until_entered())
         .await
-        .unwrap()
         .unwrap();
     assert_eq!(started.await.unwrap().unwrap_err().code, ErrorCode::Timeout);
     context.finish();
     assert!(context.outcomes().is_empty());
-    assert!(
-        tokio::time::timeout(Duration::from_millis(20), transaction(&grant, 0xffff))
-            .await
-            .is_err()
-    );
-    barrier.unblock();
+    assert_pending(transaction(&grant, 0xffff)).await;
+    barrier.open();
     client.shutdown(deadline()).await.unwrap();
     assert_eq!(context.outcomes()[0].observed, Some((50, 100)));
     assert_eq!(
         context.outcomes()[0].error.as_ref().unwrap().code,
         ErrorCode::Timeout
     );
-    assert_eq!(machine.lock().unwrap().gets, [0x10, 0x10]);
+    assert_eq!(get_codes(&machine), [0x10, 0x10]);
 }
 
 #[tokio::test]
@@ -839,7 +807,7 @@ async fn protocol_fixtures_read_only_confirmation_cannot_reuse_write_grants() {
             .code,
         ErrorCode::PermissionDenied
     );
-    assert!(machine.lock().unwrap().sets.is_empty());
+    assert!(set_pairs(&machine).is_empty());
     assert_eq!(
         client
             .set_vcp(context.clone(), endpoint, 0x10, 50)
@@ -865,7 +833,68 @@ async fn protocol_fixtures_read_only_confirmation_cannot_reuse_write_grants() {
         ErrorCode::PermissionDenied
     );
     assert_eq!(observation.outcomes()[0].observed, Some((50, 100)));
-    assert_eq!(machine.lock().unwrap().sets, [(0x10, 50)]);
+    assert_eq!(set_pairs(&machine), [(0x10, 50)]);
     context.finish();
+    client.shutdown(deadline()).await.unwrap();
+}
+#[tokio::test]
+async fn last_scan_returns_current_cache_and_scan_errors_without_extra_scan() {
+    let (client, machine) = machine();
+    assert!(client.last_scan().await.unwrap().is_none());
+    assert_eq!(machine.lock().unwrap().scan_calls, 0);
+
+    let scan = client.enumerate().await.unwrap();
+    assert_eq!(machine.lock().unwrap().scan_calls, 1);
+    let cached = client.last_scan().await.unwrap().unwrap();
+    assert_eq!(cached.endpoints.len(), scan.endpoints.len());
+    assert_eq!(cached.endpoints[0].0, scan.endpoints[0]);
+    assert!(cached.endpoints[0].1.is_none());
+    assert!(cached.error.is_none());
+
+    machine.lock().unwrap().scan_errors = vec![error(ErrorCode::PermissionDenied)];
+    assert_eq!(client.enumerate().await.unwrap().errors.len(), 1);
+    let partial = client.last_scan().await.unwrap().unwrap();
+    assert_eq!(partial.endpoints.len(), 1);
+    assert_eq!(partial.error.unwrap().code, ErrorCode::PermissionDenied);
+
+    machine.lock().unwrap().scan_failure = Some(error(ErrorCode::PermissionDenied));
+    assert_eq!(
+        client.enumerate().await.unwrap_err().code,
+        ErrorCode::PermissionDenied
+    );
+    assert_eq!(
+        client.last_scan().await.unwrap_err().code,
+        ErrorCode::PermissionDenied
+    );
+
+    {
+        let mut state = machine.lock().unwrap();
+        state.scan_failure = None;
+        state.scan_errors.clear();
+    }
+    let recovered = client.enumerate().await.unwrap();
+    assert_eq!(
+        client.last_scan().await.unwrap().unwrap().endpoints[0].0,
+        recovered.endpoints[0]
+    );
+
+    machine.lock().unwrap().endpoints = vec![
+        fake_endpoint("duplicate", None),
+        fake_endpoint("duplicate", None),
+    ];
+    assert_eq!(
+        client.enumerate().await.unwrap_err().code,
+        ErrorCode::DdcError
+    );
+    assert_eq!(
+        client.last_scan().await.unwrap_err().code,
+        ErrorCode::DdcError
+    );
+
+    machine.lock().unwrap().endpoints = (0..257)
+        .map(|index| fake_endpoint(&format!("endpoint-{index}"), None))
+        .collect();
+    assert_eq!(client.enumerate().await.unwrap_err().code, ErrorCode::Busy);
+    assert_eq!(client.last_scan().await.unwrap_err().code, ErrorCode::Busy);
     client.shutdown(deadline()).await.unwrap();
 }

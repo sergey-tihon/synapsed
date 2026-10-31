@@ -339,7 +339,7 @@ async fn lua_contract_near_cap_fault_retains_all_prior_observations() {
     let mut candidate = (*shape).clone();
     let (mut lower, mut upper) = (1usize, 1024usize);
     while lower < upper {
-        let length = (lower + upper + 1) / 2;
+        let length = (lower + upper).div_ceil(2);
         for device in &mut candidate.devices {
             for item in &mut device.characteristics {
                 item.value = Some(CharacteristicValue::String("𐐀".repeat(length)));
@@ -534,4 +534,148 @@ async fn lua_contract_empty_and_disabled_catalog_perform_no_native_access() {
             .await
             .unwrap();
     }
+}
+#[tokio::test(flavor = "current_thread")]
+async fn lua_contract_quarantine_does_not_stop_other_packages_publishing() {
+    let packages = catalog(&["fault-fixture"]);
+    let round_package = packages.path().join("round-fixture");
+    std::fs::create_dir_all(&round_package).unwrap();
+    std::fs::write(
+        round_package.join("plugin.json"),
+        r#"{
+  "apiVersion": 1,
+  "id": "round-fixture",
+  "version": "0.1.0",
+  "entry": "driver.lua",
+  "dependencies": [],
+  "supersedes": [],
+  "capabilities": {},
+  "permissions": {}
+}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        round_package.join("driver.lua"),
+        r#"return {
+  configure = function(settings)
+    local rounds = 0
+    return {
+      discover = function(ctx)
+        rounds = rounds + 1
+        return { devices = { {
+          id = "round-status",
+          kind = "instrument",
+          label = "Round " .. rounds,
+          endpoints = {},
+          identityPolicy = "slot",
+          characteristics = {
+            {
+              id = "round",
+              label = "Round",
+              spec = { kind = "number", minimum = 0, maximum = 100, step = 1, integer = true },
+              access = { read = true, write = false, notify = false },
+              writes = {},
+            },
+          },
+          onRefresh = function(ctx)
+            return { updates = { { id = "round", status = "ok", value = rounds } } }
+          end,
+        } } }
+      end,
+    }
+  end,
+}"#,
+    )
+    .unwrap();
+    let settings = BTreeMap::from([(
+        "fault-fixture".into(),
+        serde_json::json!({"mode": "exception"}),
+    )]);
+    let harness = Harness::settings(
+        packages.path(),
+        Hardware::new(vec![Screen::benq()]),
+        settings,
+    );
+    harness.until(|snapshot| snapshot.devices.len() == 2).await;
+
+    harness.hardware.mutate(16, 66);
+    let failed = harness
+        .until(|snapshot| {
+            snapshot
+                .drivers
+                .iter()
+                .any(|driver| driver.id == "fault-fixture" && driver.state == DriverState::Error)
+        })
+        .await;
+    assert!(
+        failed
+            .devices
+            .iter()
+            .any(|device| { device.id == "fault" && device.status == DeviceStatus::Unavailable })
+    );
+    assert!(
+        failed
+            .drivers
+            .iter()
+            .any(|driver| driver.id == "round-fixture" && driver.state == DriverState::Online)
+    );
+    let failed_round_device = failed
+        .devices
+        .iter()
+        .find(|device| device.id == "round-status")
+        .unwrap();
+    let failed_round_label = failed_round_device.label.clone();
+    let failed_round_value = failed_round_device
+        .characteristics
+        .iter()
+        .find(|characteristic| characteristic.id == "round")
+        .unwrap()
+        .value
+        .clone()
+        .unwrap();
+
+    let round = harness
+        .host
+        .complete_discovery_round_for_test()
+        .await
+        .unwrap();
+    assert!(round > 0);
+    let published = harness
+        .until(|snapshot| {
+            snapshot
+                .devices
+                .iter()
+                .find(|device| device.id == "round-status")
+                .is_some_and(|device| device.label != failed_round_label)
+        })
+        .await;
+    assert!(
+        published
+            .drivers
+            .iter()
+            .any(|driver| driver.id == "fault-fixture" && driver.state == DriverState::Error)
+    );
+    assert!(
+        published
+            .drivers
+            .iter()
+            .any(|driver| driver.id == "round-fixture" && driver.state == DriverState::Online)
+    );
+    let round_device = published
+        .devices
+        .iter()
+        .find(|device| device.id == "round-status")
+        .unwrap();
+    assert!(round_device.label != failed_round_label);
+    assert_eq!(round_device.status, DeviceStatus::Online);
+    let published_round_value = round_device
+        .characteristics
+        .iter()
+        .find(|characteristic| characteristic.id == "round")
+        .unwrap()
+        .value
+        .as_ref()
+        .unwrap();
+    assert_ne!(published_round_value, &failed_round_value);
+    harness.stop().await;
 }

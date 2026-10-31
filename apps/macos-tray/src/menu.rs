@@ -135,8 +135,8 @@ impl Ui {
         let tray = TrayIconBuilder::new()
             .with_id("synapsed")
             .with_menu(Box::new(menu.root.clone()))
-            .with_icon_templated(template_icon()?)
-            .with_title("Synapsed — Connecting")
+            .with_icon(template_icon()?)
+            .with_icon_as_template(true)
             .with_tooltip("Synapsed — Connecting")
             .with_menu_on_left_click(false)
             .with_menu_on_right_click(false)
@@ -219,7 +219,7 @@ impl Ui {
                 self.connection.label()
             )
         };
-        self.tray.set_title(Some(&title));
+        self.tray.set_title((driver_errors > 0).then_some("!"));
         let tooltip = self
             .service_error
             .as_ref()
@@ -359,7 +359,7 @@ impl Ui {
         let mut url = endpoint.clone();
         if let Some((device, characteristic)) = target {
             url.set_fragment(Some(&format!(
-                "device={}&characteristic={}",
+                "/devices/{}?characteristic={}",
                 encode_component(device),
                 encode_component(characteristic)
             )));
@@ -370,7 +370,6 @@ impl Ui {
     }
     pub fn detach(self) {
         self.tray.set_menu(None);
-        drop(self);
     }
 }
 
@@ -627,7 +626,7 @@ fn same_structure(old: Option<&Snapshot>, new: Option<&Snapshot>) -> bool {
 fn observation(characteristic: &Characteristic, stale: bool) -> String {
     let value = match (&characteristic.spec, &characteristic.value) {
         (CharacteristicSpec::Action, _) => "Action".into(),
-        (_, None) => "No reading yet".into(),
+        (_, None) => "Not yet observed".into(),
         (CharacteristicSpec::Enum { options }, Some(CharacteristicValue::String(value))) => options
             .iter()
             .find(|option| &option.value == value)
@@ -653,12 +652,12 @@ fn observation(characteristic: &Characteristic, stale: bool) -> String {
                 ""
             }
         }
-        CharacteristicStatus::Unavailable => " · unavailable / stale",
-        CharacteristicStatus::Error => " · error / stale",
+        CharacteristicStatus::Unavailable => " · Unavailable",
+        CharacteristicStatus::Error => " · Error",
     };
     characteristic.error.as_ref().map_or_else(
         || format!("{value}{status}"),
-        |error| format!("{value}{status} · {error}"),
+        |error| format!("{value}{status} · {}", error.message),
     )
 }
 fn metadata(characteristic: &Characteristic) -> String {
@@ -710,32 +709,112 @@ fn encode_component(value: &str) -> String {
     result
 }
 fn template_icon() -> Result<Icon, String> {
-    // A used, embedded 18px monochrome synapse glyph; no unused bundle resources.
-    const GLYPH: [&str; 18] = [
-        "..................",
-        "......###.........",
-        ".....#####........",
-        "......###.........",
-        ".......#..........",
-        ".......#..........",
-        "..###..#..........",
-        ".#####.#####......",
-        "..###########.....",
-        ".......#####......",
-        ".........#........",
-        ".........#..###...",
-        ".........#.#####..",
-        ".........######...",
-        "............#.....",
-        "..................",
-        "..................",
-        "..................",
-    ];
-    let mut rgba = Vec::with_capacity(18 * 18 * 4);
-    for line in GLYPH {
-        for byte in line.bytes() {
-            rgba.extend_from_slice(&[0, 0, 0, if byte == b'#' { 255 } else { 0 }]);
+    Icon::from_rgba(
+        include_bytes!("../assets/tray-template.rgba").to_vec(),
+        36,
+        36,
+    )
+    .map_err(|error| error.to_string())
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use synapsed_api::{
+        CharacteristicAccess, CharacteristicCommand, CharacteristicValue, Device, DriverState,
+        DriverStatus, NodeInfo,
+    };
+
+    fn snapshot() -> Snapshot {
+        Snapshot {
+            api_version: 1,
+            node: NodeInfo {
+                node_id: "00000000-0000-4000-8000-000000000001".into(),
+                instance_id: "00000000-0000-4000-8000-000000000002".into(),
+                name: "test".into(),
+            },
+            revision: "1".into(),
+            drivers: vec![DriverStatus {
+                id: "test".into(),
+                version: "1.0.0".into(),
+                state: DriverState::Online,
+                error: None,
+            }],
+            devices: vec![Device {
+                id: "device".into(),
+                driver: "test".into(),
+                kind: "test".into(),
+                label: "Device".into(),
+                status: DeviceStatus::Online,
+                error: None,
+                characteristics: vec![Characteristic {
+                    id: "value".into(),
+                    label: "Value".into(),
+                    spec: CharacteristicSpec::Boolean,
+                    access: CharacteristicAccess {
+                        read: true,
+                        write: true,
+                        notify: false,
+                    },
+                    value: Some(CharacteristicValue::Boolean(true)),
+                    status: CharacteristicStatus::Ok,
+                    error: None,
+                }],
+            }],
         }
     }
-    Icon::from_rgba(rgba, 18, 18).map_err(|error| error.to_string())
+
+    #[test]
+    fn observation_and_metadata_match_shared_value_labels() {
+        let snapshot = snapshot();
+        let characteristic = &snapshot.devices[0].characteristics[0];
+        assert_eq!(observation(characteristic, false), "On");
+        assert_eq!(observation(characteristic, true), "On · stale");
+        assert_eq!(metadata(characteristic), "Read / write · boolean");
+    }
+
+    #[test]
+    fn command_binding_revalidates_current_catalog() {
+        let catalog = Arc::new(snapshot());
+        let binding = CommandBinding {
+            catalog: catalog.clone(),
+            device_index: 0,
+            characteristic_index: 0,
+            command: CharacteristicCommand::Toggle {},
+        };
+        assert!(binding.valid_for(&catalog));
+        let mut changed = (*catalog).clone();
+        changed.devices[0].status = DeviceStatus::Unavailable;
+        assert!(!binding.valid_for(&changed));
+    }
+
+    #[test]
+    fn structure_and_route_fragment_are_stable() {
+        let current = snapshot();
+        assert!(same_structure(Some(&current), Some(&current)));
+        assert!(!same_structure(None, Some(&current)));
+        let mut url = Url::parse("http://127.0.0.1:24816/").unwrap();
+        url.set_fragment(Some(&format!(
+            "/devices/{}?characteristic={}",
+            encode_component("a&b"),
+            encode_component("c#d")
+        )));
+        assert_eq!(
+            url.as_str(),
+            "http://127.0.0.1:24816/#/devices/a%26b?characteristic=c%23d"
+        );
+    }
+
+    #[test]
+    fn encode_component_matches_encode_uri_component() {
+        for (value, expected) in [
+            ("plain", "plain"),
+            ("a&b", "a%26b"),
+            ("c#d", "c%23d"),
+            ("space here", "space%20here"),
+            ("!'()*-_.~", "!'()*-_.~"),
+            ("é/雪", "%C3%A9%2F%E9%9B%AA"),
+        ] {
+            assert_eq!(encode_component(value), expected);
+        }
+    }
 }

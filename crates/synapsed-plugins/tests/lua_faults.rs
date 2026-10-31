@@ -33,9 +33,19 @@ async fn lua_faults_exception_budget_memory_and_malformed_quarantine_once() {
                 .message
                 .contains("secret")
         );
-        let reads = harness.hardware.state.lock().unwrap().reads.len();
-        tokio::time::sleep(Duration::from_millis(1200)).await;
-        assert_eq!(harness.hardware.state.lock().unwrap().reads.len(), reads);
+        let reads = harness.hardware.state.lock().unwrap().get_calls.len();
+        assert!(
+            harness
+                .host
+                .complete_discovery_round_for_test()
+                .await
+                .unwrap()
+                > 0
+        );
+        assert_eq!(
+            harness.hardware.state.lock().unwrap().get_calls.len(),
+            reads
+        );
         harness.stop().await;
     }
 }
@@ -76,7 +86,7 @@ async fn lua_faults_wrong_register_out_of_mask_and_caught_publish_denied() {
                 .until(|snapshot| snapshot.drivers[0].state == DriverState::Error)
                 .await;
         }
-        assert!(harness.hardware.state.lock().unwrap().writes.is_empty());
+        assert!(harness.hardware.state.lock().unwrap().set_calls.is_empty());
         harness.stop().await;
     }
 }
@@ -108,7 +118,7 @@ async fn lua_faults_cancellation_before_first_set_and_after_started_set() {
             )
             .await
         });
-        tokio::time::timeout(Duration::from_secs(2), barrier.entered.notified())
+        tokio::time::timeout(Duration::from_secs(2), barrier.wait_until_entered())
             .await
             .unwrap();
         request.abort();
@@ -136,7 +146,7 @@ async fn lua_faults_cancellation_before_first_set_and_after_started_set() {
                     })
                 })
                 .await;
-            assert!(harness.hardware.state.lock().unwrap().writes.is_empty());
+            assert!(harness.hardware.state.lock().unwrap().set_calls.is_empty());
         }
         harness.stop().await;
     }
@@ -231,10 +241,17 @@ async fn lua_faults_timers_retire_with_device_epoch() {
     let packages = catalog(&["timer-fixture"]);
     let harness = Harness::start(packages.path(), Hardware::new(vec![Screen::benq()]));
     harness.until(|snapshot| !snapshot.devices.is_empty()).await;
-    harness.hardware.state.lock().unwrap().screens.clear();
+    harness.hardware.state.lock().unwrap().endpoints.clear();
     let snapshot = harness.until(|snapshot| snapshot.devices.is_empty()).await;
     let revision = snapshot.revision.clone();
-    tokio::time::sleep(Duration::from_millis(1200)).await;
+    assert!(
+        harness
+            .host
+            .complete_discovery_round_for_test()
+            .await
+            .unwrap()
+            > 0
+    );
     assert_eq!(harness.store.snapshot().revision, revision);
     harness.stop().await;
 }
@@ -263,7 +280,7 @@ async fn lua_faults_deadline_drains_started_native_work_without_inferred_confirm
     });
     tokio::time::timeout(
         Duration::from_secs(2),
-        harness.hardware.set_barrier.entered.notified(),
+        harness.hardware.set_barrier.wait_until_entered(),
     )
     .await
     .unwrap();
@@ -296,7 +313,7 @@ async fn lua_faults_partial_timer_recovery_does_not_restore_unobserved_fields() 
     {
         let mut state = harness.hardware.state.lock().unwrap();
         state.fail_reads.insert(16);
-        state.screens[0].values.get_mut(&32).unwrap().current = 177;
+        state.endpoints[0].replies.get_mut(&32).unwrap().current = 177;
     }
     let recovered = harness
         .until(|snapshot| {
@@ -318,7 +335,14 @@ async fn lua_faults_partial_timer_recovery_does_not_restore_unobserved_fields() 
         })
         .await;
     assert_eq!(value(&recovered, "a"), &CharacteristicValue::Number(40.0));
-    tokio::time::sleep(Duration::from_millis(1200)).await;
+    assert!(
+        harness
+            .host
+            .complete_discovery_round_for_test()
+            .await
+            .unwrap()
+            > 0
+    );
     let snapshot = harness.store.snapshot();
     let a = snapshot.devices[0]
         .characteristics
@@ -350,15 +374,15 @@ async fn lua_faults_active_timer_and_queued_invoke_both_finish_and_remain_observ
         .state
         .lock()
         .unwrap()
-        .reads
+        .get_calls
         .iter()
-        .filter(|code| **code == 32)
+        .filter(|call| call.1 == 32)
         .count();
     harness.hardware.get_barrier.arm();
     let _release = harness.hardware.get_barrier.release_on_drop();
     tokio::time::timeout(
         Duration::from_secs(2),
-        harness.hardware.get_barrier.entered.notified(),
+        harness.hardware.get_barrier.wait_until_entered(),
     )
     .await
     .unwrap();
@@ -391,9 +415,9 @@ async fn lua_faults_active_timer_and_queued_invoke_both_finish_and_remain_observ
             .state
             .lock()
             .unwrap()
-            .reads
+            .get_calls
             .iter()
-            .filter(|code| **code == 32)
+            .filter(|call| call.1 == 32)
             .count()
             >= before + 2
     );

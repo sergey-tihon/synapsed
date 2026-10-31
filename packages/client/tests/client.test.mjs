@@ -57,6 +57,7 @@ test("native HTTP validates each response, encodes IDs and exposes bounded API e
   assert.equal((await client.getDevice("instrument")).device.characteristics[0].value, 4.5);
   server.recent = [log(1)];
   assert.equal((await client.getLogs()).entries[0].id, "1");
+  assert.equal((await client.getInventory()).nodes[0].kind, "host");
   const result = await client.execute("instrument", "measurement", { op: "step", steps: -2 });
   assert.equal(result.devices[0].characteristics[0].value, 3.5);
   assert.equal(server.mutationCount, 1);
@@ -82,6 +83,23 @@ test("native HTTP validates each response, encodes IDs and exposes bounded API e
     ProtocolValidationError,
   );
   assert.equal(server.requests.length, before, "invalid commands are not sent");
+});
+
+test("inventory responses cannot cross a subscribed daemon instance epoch", async (t) => {
+  const server = await serverFixture(t);
+  const client = server.client();
+  const state = observer(client);
+  await state.until((value) => value.snapshots.at(-1)?.node.instanceId === INSTANCE_A);
+
+  server.current = snapshot("0", INSTANCE_B, 55);
+  server.inventory = { ...server.inventory, instanceId: INSTANCE_B };
+  await assert.rejects(client.getInventory(), StaleResponseError);
+  await state.until((value) => value.snapshots.at(-1)?.node.instanceId === INSTANCE_B);
+
+  const inventory = await client.getInventory();
+  assert.equal(inventory.instanceId, INSTANCE_B);
+  assert.equal(state.state.snapshots.at(-1).node.instanceId, inventory.instanceId);
+  assert.equal(server.connectionCount, 2);
 });
 
 test("one demanded socket waits for an actual initial snapshot and serves late subscribers", async (t) => {
@@ -528,4 +546,45 @@ test("standalone HTTP epoch changes invalidate outstanding old-generation respon
     "invalid obsolete data must not poison the current client",
   );
   assert.equal(server.connectionCount, 0);
+});
+test("oversized event frames permanently stop the event stream", async (t) => {
+  const server = await serverFixture(t);
+  server.onConnection = (peer) => peer.send(" ".repeat(1_048_577));
+  const state = observer(server.client());
+  await state.until((value) => value.statuses.includes("incompatible"));
+  assert.ok(state.state.errors.some((error) => error instanceof ProtocolValidationError));
+  assert.equal(server.connectionCount, 1);
+});
+
+test("protocol-invalid websocket close codes permanently stop reconnect", async (t) => {
+  for (const code of [1002, 1003, 1007, 1008, 1009]) {
+    const server = await serverFixture(t);
+    server.onConnection = (peer) => {
+      peer.send(JSON.stringify({ type: "snapshot", snapshot: server.current }));
+      peer.close(code, "protocol rejection");
+    };
+    const state = observer(server.client());
+    await state.until((value) => value.statuses.includes("incompatible"));
+    assert.equal(server.connectionCount, 1, `close code ${code}`);
+    assert.ok(state.state.errors.length > 0, `close code ${code}`);
+  }
+});
+test("a device response is stale when a newer snapshot has removed that device", async (t) => {
+  const server = await serverFixture(t);
+  const client = server.client();
+  await client.getSnapshot();
+  const release = deferred();
+  t.after(() => release.resolve());
+  server.routes.set(`GET ${DEVICE_ROUTE}`, async ({ response }) => {
+    await release.promise;
+    response.writeHead(200, { "Content-Type": "application/json" });
+    response.end(JSON.stringify({ node: snapshot().node, revision: "0", device: snapshot().devices[0] }));
+  });
+  const delayedDevice = client.getDevice("instrument");
+  const rejected = assert.rejects(delayedDevice, StaleResponseError);
+  await server.waitRequest("GET", DEVICE_ROUTE);
+  server.current = { ...snapshot("1"), devices: [] };
+  await client.getSnapshot();
+  release.resolve();
+  await rejected;
 });

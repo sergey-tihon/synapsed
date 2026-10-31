@@ -3,17 +3,23 @@ use crate::{DriverError, ErrorCode, VcpValue};
 use sha2::{Digest, Sha256};
 use std::fmt::Write;
 
+/// Minimum delay required after a DDC/CI Set before checking the result.
 pub const IO_DELAY: std::time::Duration = std::time::Duration::from_millis(50);
+/// Exact byte length of a DDC/CI Get VCP reply frame.
 pub const REPLY_BYTES: usize = 11;
+/// Calculate the XOR checksum of a byte sequence with an initial seed.
 pub fn checksum(seed: u8, bytes: &[u8]) -> u8 {
     bytes.iter().fold(seed, |sum, byte| sum ^ byte)
 }
+/// Build a macOS IOAV Get VCP request frame.
 pub fn macos_get_frame(code: u8) -> [u8; 4] {
     [0x82, 0x01, code, 0x6e ^ 0x82 ^ 0x01 ^ code]
 }
+/// Build a Linux I2C Get VCP request frame.
 pub fn linux_get_frame(code: u8) -> [u8; 5] {
     [0x51, 0x82, 0x01, code, 0x6e ^ 0x51 ^ 0x82 ^ 0x01 ^ code]
 }
+/// Build a macOS IOAV Set VCP request frame.
 pub fn macos_set_frame(code: u8, value: u16) -> [u8; 6] {
     let [hi, lo] = value.to_be_bytes();
     [
@@ -25,12 +31,14 @@ pub fn macos_set_frame(code: u8, value: u16) -> [u8; 6] {
         0x6e ^ 0x51 ^ 0x84 ^ 0x03 ^ code ^ hi ^ lo,
     ]
 }
+/// Build a Linux I2C Set VCP request frame.
 pub fn linux_set_frame(code: u8, value: u16) -> [u8; 7] {
     let frame = macos_set_frame(code, value);
     [
         0x51, frame[0], frame[1], frame[2], frame[3], frame[4], frame[5],
     ]
 }
+/// Parse and validate a DDC/CI Get VCP reply for the requested code.
 pub fn parse_reply(code: u8, bytes: &[u8]) -> Result<VcpValue, DriverError> {
     if bytes.len() != REPLY_BYTES
         || bytes[0] != 0x6e
@@ -47,6 +55,7 @@ pub fn parse_reply(code: u8, bytes: &[u8]) -> Result<VcpValue, DriverError> {
         current: u16::from_be_bytes([bytes[8], bytes[9]]),
     })
 }
+/// Ensure that a native I2C transfer completed every requested message.
 pub fn check_transfer(completed: u32, expected: u32) -> Result<(), DriverError> {
     if completed != expected {
         return Err(ddc_error("I2C transfer did not complete every message."));
@@ -55,10 +64,15 @@ pub fn check_transfer(completed: u32, expected: u32) -> Result<(), DriverError> 
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Manufacturer and product identity decoded from validated base EDID data.
 pub struct EdidIdentity {
+    /// Valid three-letter manufacturer code, if present in the EDID.
     pub manufacturer: Option<String>,
+    /// Product code stored in the EDID.
     pub product: u16,
+    /// Non-empty monitor name from a valid EDID descriptor, if available.
     pub product_name: Option<String>,
+    /// SHA-256 identity of the validated 128-byte EDID base block.
     pub identity: String,
 }
 /// Hash only a validated 128-byte base block. Never retain or export serials/raw data.
@@ -88,7 +102,7 @@ pub fn parse_base_edid(bytes: &[u8]) -> Result<EdidIdentity, DriverError> {
         None
     };
     let mut product_name = None;
-    for descriptor in bytes[54..126].chunks_exact(18) {
+    for descriptor in bytes[54..126].as_chunks::<18>().0 {
         if descriptor[..5] == [0, 0, 0, 0xfc, 0] {
             let text = &descriptor[5..18];
             let end = text

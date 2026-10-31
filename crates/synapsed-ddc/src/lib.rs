@@ -1,9 +1,17 @@
+#![warn(missing_docs)]
+
 //! Native-only DDC owner and Send queue proxy. Handles and blocking I/O never leave the owner.
+/// Linux-native DDC transport backend.
 #[cfg(target_os = "linux")]
 pub mod linux;
+/// macOS-native DDC transport backend.
 #[cfg(target_os = "macos")]
 pub mod macos;
+/// DDC/CI protocol framing and EDID parsing.
 pub mod protocol;
+/// Configurable in-memory DDC backend for tests.
+#[cfg(feature = "test-support")]
+pub mod test_support;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
@@ -15,6 +23,7 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
+/// Shared error and endpoint identity types from the core crate.
 pub use synapsed_core::{DriverError, EndpointToken, ErrorCode};
 use synapsed_core::{OperationContext, OperationState, TransportOutcome};
 use tokio::sync::{Notify, oneshot};
@@ -29,50 +38,128 @@ static ENDPOINT_IDS: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+/// Current and maximum values observed for a VCP feature.
 pub struct VcpValue {
+    /// Currently observed value.
     pub current: u16,
+    /// Maximum supported value reported by the display.
     pub maximum: u16,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+/// Public metadata for an endpoint discovered by a DDC scan.
 pub struct EndpointDescriptor {
+    /// Token used to authorize operations on this endpoint generation.
     pub token: EndpointToken,
+    /// Capability identifier advertised for this endpoint.
     pub capability: String,
+    /// Three-letter manufacturer code when valid EDID data is available.
     pub manufacturer: Option<String>,
+    /// Manufacturer-specific product code when available.
     pub product: Option<u16>,
+    /// Product name decoded from valid base EDID data, when available.
     pub product_name: Option<String>,
+    /// Opaque stable identity derived from validated base EDID data.
     pub identity: Option<String>,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct Inventory {
+/// Public endpoint scan and any non-fatal scan errors.
+pub struct EndpointScan {
+    /// Discovered endpoint descriptors.
     pub endpoints: Vec<EndpointDescriptor>,
+    /// Errors that did not prevent the rest of the scan from completing.
     pub errors: Vec<DriverError>,
 }
+/// Owner's most recent successful scan, including any non-fatal error state.
+#[derive(Debug, Clone)]
+pub struct CachedEndpointScan {
+    /// Endpoints and owner-local placements from the completed scan.
+    pub endpoints: Vec<(EndpointDescriptor, Option<Placement>)>,
+    /// First non-fatal error, if the scan was only partially successful.
+    pub error: Option<DriverError>,
+}
 
+/// Owner-local display placement; controller keys are never serialized by the daemon API.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Placement {
+    /// DRM connector or framebuffer label.
+    pub connector: String,
+    /// Graphics-controller key used only by the inventory builder.
+    pub controller_key: String,
+}
+
+/// Shared lazy handle for one DDC owner used by plugins and passive inventory.
+#[derive(Clone, Default)]
+pub struct LazyDdc(Arc<std::sync::Mutex<Option<DdcClient>>>);
+impl LazyDdc {
+    /// Creates an empty lazy handle without starting a native DDC owner.
+    pub fn new() -> Self {
+        Self::default()
+    }
+    /// Shares an already-started owner.
+    pub fn with_client(client: DdcClient) -> Self {
+        Self(Arc::new(std::sync::Mutex::new(Some(client))))
+    }
+    /// Returns a clone of the existing client without starting an owner.
+    pub fn existing(&self) -> Option<DdcClient> {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+    /// Returns the shared client, starting the native owner only when first requested.
+    pub fn get_or_start_native(&self) -> Result<DdcClient, DriverError> {
+        let mut client = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if client.is_none() {
+            *client = Some(DdcClient::start_native()?);
+        }
+        client.clone().ok_or_else(unavailable)
+    }
+}
+
+/// Raw DDC transport operations, invoked only on the native owner thread.
 pub trait DdcTransport {
+    /// Read a VCP feature's current and maximum values.
     fn get_vcp(&mut self, code: u8) -> Result<VcpValue, DriverError>;
     /// Raw transport Set, including its post-Set delay. Confirmation belongs to the owner.
     fn set_vcp(&mut self, code: u8, value: u16) -> Result<(), DriverError>;
 }
-/// Owner-local scan result. The key may contain native identifiers but is never serialized.
+/// Owner-local endpoint handle and metadata; native keys and transports are never serialized.
 pub struct OwnedEndpoint {
+    /// Opaque native key used only by the owner to track this endpoint.
     pub key: String,
+    /// Validated manufacturer code, if available.
     pub manufacturer: Option<String>,
+    /// Manufacturer-specific product code, if available.
     pub product: Option<u16>,
+    /// Product name, if available.
     pub product_name: Option<String>,
+    /// Stable identity derived from validated EDID data, if available.
     pub identity: Option<String>,
+    /// Display placement discovered by the platform backend, if available.
+    pub placement: Option<Placement>,
+    /// Native transport handle that must remain on the owner thread.
     pub transport: Box<dyn DdcTransport>,
 }
+/// Owner-local results of a backend scan, including handles not exposed to clients.
 pub struct InventoryWithOwnedHandles {
+    /// Endpoint handles discovered by the scan.
     pub endpoints: Vec<OwnedEndpoint>,
+    /// Non-fatal scan errors.
     pub errors: Vec<DriverError>,
 }
+/// Factory interface for scanning native DDC endpoints on the owner thread.
 pub trait DdcBackend {
+    /// Scan available endpoints and preserve ownership of their native transports.
     fn scan(&mut self) -> Result<InventoryWithOwnedHandles, DriverError>;
 }
 
 #[derive(Clone)]
+/// Sendable queue proxy for the thread that owns native DDC handles and I/O.
 pub struct DdcClient {
     inner: Arc<ClientInner>,
 }
@@ -94,7 +181,10 @@ type Reply<T> = oneshot::Sender<Result<T, DriverError>>;
 enum Request {
     Enumerate {
         deadline: Instant,
-        reply: Reply<Inventory>,
+        reply: Reply<EndpointScan>,
+    },
+    LastScan {
+        reply: Reply<Option<CachedEndpointScan>>,
     },
     Get {
         context: OperationContext,
@@ -129,6 +219,7 @@ impl DdcClient {
             ))
         }
     }
+    /// Start an owner using a backend factory confined to its owner thread.
     pub fn start_with_backend<B, F>(factory: F) -> Result<Self, DriverError>
     where
         B: DdcBackend + 'static,
@@ -195,31 +286,41 @@ impl DdcClient {
                 TrySendError::Disconnected(_) => unavailable(),
             })
     }
-    pub async fn enumerate(&self) -> Result<Inventory, DriverError> {
+    /// Enumerate DDC endpoints and return any non-fatal scan errors.
+    pub async fn enumerate(&self) -> Result<EndpointScan, DriverError> {
         let deadline = Instant::now() + REQUEST_TIMEOUT;
         let (reply, receiver) = oneshot::channel();
         self.enqueue(Request::Enumerate { deadline, reply })?;
         receive(receiver, deadline).await
     }
-    pub async fn get_vcp(
-        &self,
-        context: OperationContext,
+    /// Return the owner's last scan without initiating a scan or native I/O.
+    pub async fn last_scan(&self) -> Result<Option<CachedEndpointScan>, DriverError> {
+        let deadline = Instant::now() + REQUEST_TIMEOUT;
+        let (reply, receiver) = oneshot::channel();
+        self.enqueue(Request::LastScan { reply })?;
+        receive(receiver, deadline).await
+    }
+    fn resolve_endpoint(
+        context: &OperationContext,
         endpoint: EndpointToken,
         code: u8,
-    ) -> Result<VcpValue, DriverError> {
-        context.validate(endpoint, code, false)?;
+        write: bool,
+    ) -> Result<(), DriverError> {
+        context.validate(endpoint, code, write)
+    }
+    async fn transact<T>(
+        &self,
+        context: &OperationContext,
+        request: impl FnOnce(Reply<T>) -> Request,
+    ) -> Result<T, DriverError> {
+        let deadline = context.deadline();
         let (reply, receiver) = oneshot::channel();
-        self.enqueue(Request::Get {
-            context: context.clone(),
-            endpoint,
-            code,
-            reply,
-        })?;
+        self.enqueue(request(reply))?;
         let mut abandonment = Abandonment {
-            context: &context,
+            context,
             armed: true,
         };
-        let result = receive(receiver, context.deadline()).await;
+        let result = receive(receiver, deadline).await;
         abandonment.armed = false;
         if result
             .as_ref()
@@ -229,6 +330,23 @@ impl DdcClient {
         }
         result
     }
+    /// Read a VCP feature after validating the operation grant.
+    pub async fn get_vcp(
+        &self,
+        context: OperationContext,
+        endpoint: EndpointToken,
+        code: u8,
+    ) -> Result<VcpValue, DriverError> {
+        Self::resolve_endpoint(&context, endpoint, code, false)?;
+        self.transact(&context, |reply| Request::Get {
+            context: context.clone(),
+            endpoint,
+            code,
+            reply,
+        })
+        .await
+    }
+    /// Write a VCP feature and return the confirmed readback value.
     pub async fn set_vcp(
         &self,
         context: OperationContext,
@@ -236,28 +354,15 @@ impl DdcClient {
         code: u8,
         value: u16,
     ) -> Result<VcpValue, DriverError> {
-        context.validate(endpoint, code, true)?;
-        let (reply, receiver) = oneshot::channel();
-        self.enqueue(Request::Set {
+        Self::resolve_endpoint(&context, endpoint, code, true)?;
+        self.transact(&context, |reply| Request::Set {
             context: context.clone(),
             endpoint,
             code,
             value,
             reply,
-        })?;
-        let mut abandonment = Abandonment {
-            context: &context,
-            armed: true,
-        };
-        let result = receive(receiver, context.deadline()).await;
-        abandonment.armed = false;
-        if result
-            .as_ref()
-            .is_err_and(|error| error.code == ErrorCode::Timeout)
-        {
-            context.cancel();
-        }
-        result
+        })
+        .await
     }
     /// Stop admission, drain any already-started I/O, and bound waiting without joining stuck code.
     pub async fn shutdown(&self, deadline: Instant) -> Result<(), DriverError> {
@@ -300,6 +405,9 @@ fn reject(request: Request, error: DriverError) {
         Request::Enumerate { reply, .. } => {
             let _ = reply.send(Err(error));
         }
+        Request::LastScan { reply } => {
+            let _ = reply.send(Err(error));
+        }
         Request::Get { context, reply, .. } | Request::Set { context, reply, .. } => {
             context.cancel();
             let _ = reply.send(Err(error));
@@ -321,6 +429,8 @@ struct FreshRead {
 }
 #[derive(Default)]
 struct Owner {
+    last_scan: Option<CachedEndpointScan>,
+    last_scan_error: Option<DriverError>,
     records: HashMap<String, EndpointRecord>,
     endpoints: HashMap<u64, NativeEndpoint>,
     fresh: HashMap<(u64, EndpointToken, u8), FreshRead>,
@@ -335,15 +445,20 @@ impl Owner {
                 )
         });
     }
-    fn scan<B: DdcBackend>(&mut self, backend: &mut B) -> Result<Inventory, DriverError> {
+    fn invalidate_scan(&mut self, error: DriverError) {
+        self.last_scan = None;
+        self.last_scan_error = Some(error);
+        self.endpoints.clear();
+        self.fresh.clear();
+        for record in self.records.values_mut() {
+            record.present = false;
+        }
+    }
+    fn scan<B: DdcBackend>(&mut self, backend: &mut B) -> Result<EndpointScan, DriverError> {
         let scanned = match backend.scan() {
             Ok(scanned) => scanned,
             Err(error) => {
-                self.endpoints.clear();
-                self.fresh.clear();
-                for record in self.records.values_mut() {
-                    record.present = false;
-                }
+                self.invalidate_scan(error.clone());
                 return Err(error);
             }
         };
@@ -356,7 +471,9 @@ impl Owner {
                     .count()
                 > MAX_ENDPOINT_HISTORY
         {
-            return Err(busy("Native DDC endpoint inventory exceeds its limit."));
+            let error = busy("Native DDC endpoint inventory exceeds its limit.");
+            self.invalidate_scan(error.clone());
+            return Err(error);
         }
         let mut keys = std::collections::HashSet::with_capacity(scanned.endpoints.len());
         if scanned
@@ -364,13 +481,14 @@ impl Owner {
             .iter()
             .any(|endpoint| !keys.insert(&endpoint.key))
         {
-            return Err(protocol::ddc_error(
-                "Native DDC scan returned duplicate endpoints.",
-            ));
+            let error = protocol::ddc_error("Native DDC scan returned duplicate endpoints.");
+            self.invalidate_scan(error.clone());
+            return Err(error);
         }
         drop(keys);
         let mut endpoints = HashMap::with_capacity(scanned.endpoints.len());
         let mut descriptors = Vec::with_capacity(scanned.endpoints.len());
+        let mut cached = Vec::with_capacity(scanned.endpoints.len());
         for endpoint in scanned.endpoints {
             let record = self
                 .records
@@ -388,14 +506,16 @@ impl Owner {
             }
             record.present = true;
             record.identity = endpoint.identity.clone();
-            descriptors.push(EndpointDescriptor {
+            let descriptor = EndpointDescriptor {
                 token: record.token,
                 capability: "ddc".into(),
                 manufacturer: endpoint.manufacturer,
                 product: endpoint.product,
                 product_name: endpoint.product_name,
                 identity: endpoint.identity,
-            });
+            };
+            cached.push((descriptor.clone(), endpoint.placement));
+            descriptors.push(descriptor);
             endpoints.insert(
                 record.token.id,
                 NativeEndpoint {
@@ -416,7 +536,13 @@ impl Owner {
                 .is_some_and(|endpoint| endpoint.token == *token)
         });
         descriptors.sort_unstable_by_key(|descriptor| descriptor.token);
-        Ok(Inventory {
+        cached.sort_unstable_by_key(|(descriptor, _)| descriptor.token);
+        self.last_scan = Some(CachedEndpointScan {
+            endpoints: cached,
+            error: scanned.errors.first().cloned(),
+        });
+        self.last_scan_error = None;
+        Ok(EndpointScan {
             endpoints: descriptors,
             errors: scanned.errors,
         })
@@ -535,6 +661,13 @@ impl Owner {
                     Err(timeout())
                 } else {
                     result
+                };
+                let _ = reply.send(result);
+            }
+            Request::LastScan { reply } => {
+                let result = match &self.last_scan_error {
+                    Some(error) => Err(error.clone()),
+                    None => Ok(self.last_scan.clone()),
                 };
                 let _ = reply.send(result);
             }

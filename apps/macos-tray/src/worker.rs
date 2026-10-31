@@ -32,12 +32,38 @@ pub struct Completion {
     pub binding: CommandBinding,
     pub error: Option<String>,
 }
+#[derive(Default)]
+struct CoalescingWake {
+    pending: bool,
+}
+impl CoalescingWake {
+    fn request(&mut self) -> bool {
+        let should_wake = !self.pending;
+        self.pending = true;
+        should_wake
+    }
+    fn take(&mut self) {
+        self.pending = false;
+    }
+}
+#[cfg(test)]
+mod wake_tests {
+    use super::CoalescingWake;
+    #[test]
+    fn coalesces_until_taken() {
+        let mut wake = CoalescingWake::default();
+        assert!(wake.request());
+        assert!(!wake.request());
+        wake.take();
+        assert!(wake.request());
+    }
+}
 pub struct View {
     pub snapshot: Option<Arc<Snapshot>>,
     pub connection: Connection,
     pub error: Option<String>,
     pub completions: Vec<Completion>,
-    wake_pending: bool,
+    wake: CoalescingWake,
 }
 impl Default for View {
     fn default() -> Self {
@@ -46,7 +72,7 @@ impl Default for View {
             connection: Connection::Connecting,
             error: None,
             completions: Vec::with_capacity(MAX_PENDING),
-            wake_pending: false,
+            wake: CoalescingWake::default(),
         }
     }
 }
@@ -68,26 +94,24 @@ impl Mailbox {
         self.inner.lock().unwrap_or_else(|error| error.into_inner())
     }
     fn update(&self, change: impl FnOnce(&mut View)) {
-        let wake = {
+        let should_wake = {
             let mut view = self.lock();
             change(&mut view);
-            let wake = !view.wake_pending;
-            view.wake_pending = true;
-            wake
+            view.wake.request()
         };
-        if wake {
+        if should_wake {
             let _ = self.proxy.send_event(UiEvent::Wake);
         }
     }
     pub fn take(&self) -> View {
         let mut view = self.lock();
-        view.wake_pending = false;
+        view.wake.take();
         View {
             snapshot: view.snapshot.clone(),
             connection: view.connection,
             error: view.error.clone(),
             completions: std::mem::take(&mut view.completions),
-            wake_pending: false,
+            wake: CoalescingWake::default(),
         }
     }
     fn state(&self, client: &Client, connection: Connection, error: Option<String>) {

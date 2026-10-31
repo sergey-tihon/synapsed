@@ -118,7 +118,7 @@ async fn moonhalo_packed_fields_failed_fresh_read_and_noops_never_set() {
         )
         .await
         .unwrap();
-    assert!(harness.hardware.state.lock().unwrap().writes.is_empty());
+    assert!(harness.hardware.state.lock().unwrap().set_calls.is_empty());
     harness
         .hardware
         .state
@@ -136,7 +136,7 @@ async fn moonhalo_packed_fields_failed_fresh_read_and_noops_never_set() {
         .await
         .unwrap_err();
     assert_eq!(error.code, ErrorCode::DdcError);
-    assert!(harness.hardware.state.lock().unwrap().writes.is_empty());
+    assert!(harness.hardware.state.lock().unwrap().set_calls.is_empty());
     harness.stop().await;
 }
 #[tokio::test(flavor = "current_thread")]

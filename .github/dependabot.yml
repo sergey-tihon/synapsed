@@ -1,0 +1,33 @@
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: /
+    schedule: { interval: weekly, day: monday }
+    open-pull-requests-limit: 10
+    groups:
+      rust-async: { patterns: ["tokio*", "axum*", "reqwest", "futures-*", "bytes", "hyper*"] }
+      rust-serde: { patterns: ["serde*", "toml*", "schemars"] }
+      rust-macos: { patterns: ["tray-icon", "tao", "muda", "open", "objc2*"] }
+      rust-lua: { patterns: ["mlua"] }
+      rust-other: { patterns: ["*"], update-types: ["minor", "patch"] }
+  - package-ecosystem: npm
+    directory: /
+    schedule: { interval: weekly, day: monday }
+    open-pull-requests-limit: 10
+    groups:
+      solid: { patterns: ["solid-js", "@solidjs/*", "vite", "vitest", "jsdom"] }
+      raycast: { patterns: ["@raycast/*", "react", "@types/react"] }
+      elgato: { patterns: ["@elgato/*"] }
+      rollup: { patterns: ["rollup", "@rollup/*", "tslib"] }
+      schema-tools: { patterns: ["ajv*", "json-schema-to-typescript"] }
+      tooling:
+        { patterns: ["prettier", "@johnnymorganz/stylua-bin", "typescript", "@types/node", "@resvg/*", "eslint*"] }
+    ignore:
+      - dependency-name: typescript
+        update-types: ["version-update:semver-major"]
+  - package-ecosystem: github-actions
+    directory: /
+    schedule: { interval: weekly, day: monday }
+    groups: { actions: { patterns: ["*"] } }
+    ignore:
+      - dependency-name: dtolnay/rust-toolchain

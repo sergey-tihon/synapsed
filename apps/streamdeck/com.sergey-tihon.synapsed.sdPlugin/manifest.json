@@ -26,13 +26,13 @@
     {
       "Name": "Characteristic",
       "UUID": "com.sergey-tihon.synapsed.characteristic",
-      "Icon": "imgs/actions/benq/icon",
+      "Icon": "imgs/actions/characteristic/icon",
       "Tooltip": "Bind a local characteristic. Rotate to step; press runs the configured command or secondary binding.",
-      "PropertyInspectorPath": "ui/characteristic.html",
+      "PropertyInspectorPath": "bin/inspector/index.html",
       "Controllers": ["Keypad", "Encoder"],
       "UserTitleEnabled": false,
       "Encoder": {
-        "Icon": "imgs/actions/benq/key",
+        "Icon": "imgs/actions/characteristic/key",
         "layout": "layouts/metric.json",
         "TriggerDescription": {
           "Rotate": "Step the bound number or enum",
@@ -41,7 +41,7 @@
       },
       "States": [
         {
-          "Image": "imgs/actions/benq/key",
+          "Image": "imgs/actions/characteristic/key",
           "Title": "Configure",
           "TitleAlignment": "middle"
         }

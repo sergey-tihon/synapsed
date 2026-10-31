@@ -112,6 +112,51 @@ fn snapshot(value: &Value) -> Result<()> {
 fn log(value: &Value) -> Result<()> {
     fields(value, &["id", "timestamp", "level", "target", "message"]).map(|_| ())
 }
+fn inventory_source(value: &Value) -> Result<()> {
+    fields(value, &["kind", "state", "message"]).map(|_| ())
+}
+fn inventory_driver(value: &Value) -> Result<()> {
+    fields(value, &["id", "version", "class", "deviceId"]).map(|_| ())
+}
+fn inventory_node(value: &Value) -> Result<()> {
+    let value = fields(
+        value,
+        &[
+            "id",
+            "parentId",
+            "kind",
+            "label",
+            "detail",
+            "vendorId",
+            "productId",
+            "speedMbps",
+            "connected",
+            "attachment",
+            "relation",
+            "rule",
+            "driver",
+        ],
+    )?;
+    if value["driver"].is_null() {
+        Ok(())
+    } else {
+        inventory_driver(&value["driver"])
+    }
+}
+fn inventory_response(value: &Value) -> Result<()> {
+    let value = fields(
+        value,
+        &[
+            "apiVersion",
+            "instanceId",
+            "generatedAt",
+            "sources",
+            "nodes",
+        ],
+    )?;
+    array(&value["sources"], inventory_source)?;
+    array(&value["nodes"], inventory_node)
+}
 macro_rules! wire {
     ($type:ty, $shape:expr) => {
         impl Wire for $type {
@@ -125,6 +170,7 @@ macro_rules! wire {
     };
 }
 wire!(Snapshot, snapshot);
+wire!(InventoryResponse, inventory_response);
 wire!(ErrorResponse, |value: &Value| {
     let value = fields(value, &["error"])?;
     error(&value["error"])

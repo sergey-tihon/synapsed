@@ -1,3 +1,5 @@
+import type { JsonValue } from "@elgato/utils";
+import type { SendToPluginEvent } from "@elgato/streamdeck";
 import {
   action,
   SingletonAction,
@@ -12,6 +14,7 @@ import {
 } from "@elgato/streamdeck";
 import type { ActionSettings } from "./settings.js";
 import type { Contexts } from "./contexts.js";
+import { clampDialTicks } from "./model.js";
 
 @action({ UUID: "com.sergey-tihon.synapsed.characteristic" })
 export class CharacteristicAction extends SingletonAction<ActionSettings> {
@@ -39,7 +42,7 @@ export class CharacteristicAction extends SingletonAction<ActionSettings> {
     this.contexts.inspectorDisappeared(ev.action.id);
   }
 
-  override onSendToPlugin(ev: Parameters<NonNullable<SingletonAction<ActionSettings>["onSendToPlugin"]>>[0]): void {
+  override onSendToPlugin(ev: SendToPluginEvent<JsonValue, ActionSettings>): void {
     this.contexts.inspectorRequest(ev.action.id, ev.payload);
   }
 
@@ -55,7 +58,7 @@ export class CharacteristicAction extends SingletonAction<ActionSettings> {
 
   override onDialRotate(ev: DialRotateEvent<ActionSettings>): Promise<void> {
     this.contexts.settingsChanged(ev.action.id, ev.payload.settings);
-    const steps = Math.max(-100, Math.min(100, Math.trunc(ev.payload.ticks)));
+    const steps = clampDialTicks(ev.payload.ticks);
     if (!Number.isFinite(steps) || steps === 0) return Promise.resolve();
     return this.contexts.trigger(ev.action.id, "rotate", steps);
   }

@@ -1,9 +1,6 @@
 //! A small bounded socket owner keeps ping/pong and cancellation alive even when
 //! a consumer temporarily drops its `next()` future or is not reading UI events.
-use crate::{
-    Client, ClientError, REQUEST_TIMEOUT, SOCKET_IDLE_TIMEOUT, ServerEvent, Socket, socket_error,
-    wire,
-};
+use crate::{Client, ClientError, ServerEvent, Socket, socket_error, wire};
 use futures_util::{SinkExt, StreamExt};
 use tokio::{sync::mpsc, task::JoinHandle, time::timeout};
 use tokio_tungstenite::tungstenite::Message;
@@ -33,9 +30,15 @@ async fn drive(
     loop {
         client.inner.state().check_socket(token)?;
         let frame = tokio::select! {
-            frame = timeout(SOCKET_IDLE_TIMEOUT, socket.next()) => frame.map_err(|_| ClientError::Timeout)?,
-            _ = changed.changed() => continue,
-            _ = sender.closed() => return Ok(()),
+            frame = timeout(client.inner.socket_idle_timeout, socket.next()) => {
+                frame.map_err(|_| ClientError::Timeout)?
+            }
+            _ = changed.changed() => {
+                continue;
+            }
+            _ = sender.closed() => {
+                return Ok(());
+            }
         };
         client.inner.state().check_socket(token)?;
         match frame {
@@ -47,8 +50,12 @@ async fn drive(
             }
             Some(Ok(Message::Ping(bytes))) => {
                 tokio::select! {
-                    result = timeout(REQUEST_TIMEOUT, socket.send(Message::Pong(bytes))) => result.map_err(|_| ClientError::Timeout)?.map_err(socket_error)?,
-                    _ = changed.changed() => { client.inner.state().check_socket(token)?; }
+                    result = timeout(client.inner.request_timeout, socket.send(Message::Pong(bytes))) => {
+                        result.map_err(|_| ClientError::Timeout)?.map_err(socket_error)?;
+                    }
+                    _ = changed.changed() => {
+                        client.inner.state().check_socket(token)?;
+                    }
                 }
             }
             Some(Ok(Message::Pong(_))) => {}

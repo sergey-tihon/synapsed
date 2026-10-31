@@ -2,17 +2,33 @@ import streamDeck, { type Action } from "@elgato/streamdeck";
 import {
   defaultCommand,
   isCommandApplicable,
-  parseCharacteristicValue,
   supportsStep,
-  type Characteristic,
   type CharacteristicCommand,
   type ClientStatus,
   type SynapsedClient,
   type Snapshot,
 } from "@synapsed/client";
+import { buildCatalog } from "./catalog.js";
+import { isSelection, selectionFromSettings, type InspectorRequest } from "./protocol.js";
 import { renderDisplay, resolveBinding } from "./render.js";
-import { isBinding, settingsConform, type ActionSettings, type Binding } from "./settings.js";
+import { settingsConform, type ActionSettings, type Binding } from "./settings.js";
+import { validateInspectorCommand } from "./inspector-command.js";
 
+function keyImage(settings: ActionSettings, snapshot: Snapshot | undefined, status: ClientStatus): string {
+  if (!settingsConform(settings) || !settings.binding) return "imgs/keys/configure.svg";
+  const resolved = resolveBinding(snapshot, settings.binding);
+  if (
+    status !== "connected" ||
+    !resolved ||
+    resolved.device.status !== "online" ||
+    resolved.characteristic.status !== "ok"
+  )
+    return "imgs/keys/offline.svg";
+  const { characteristic } = resolved;
+  if (characteristic.spec.kind === "boolean")
+    return characteristic.value === true ? "imgs/keys/boolean-on.svg" : "imgs/keys/boolean-off.svg";
+  return `imgs/keys/${characteristic.spec.kind}.svg`;
+}
 type VisibleContext = {
   action: Action<ActionSettings>;
   settings: ActionSettings;
@@ -23,58 +39,16 @@ type VisibleContext = {
 };
 type Inspector = {
   action: Action<ActionSettings>;
-  settings: ActionSettings;
   active: boolean;
   appearances: number;
-  version: number;
   sending: boolean;
   queued: boolean;
-  selection?: { deviceId: string; characteristicId: string; pressDeviceId: string; pressCharacteristicId: string };
+  selection: ReturnType<typeof selectionFromSettings>;
+  requested: boolean;
 };
 
 function bindingKey(binding: Binding): string {
   return `${binding.deviceId}/${binding.characteristicId}`;
-}
-
-/** Strip additive unknown fields before sending public metadata through the SDK's JSON API. */
-function inspectorCharacteristic(characteristic: Characteristic | undefined) {
-  if (!characteristic) return null;
-  const spec = characteristic.spec;
-  const metadata =
-    spec.kind === "number"
-      ? {
-          kind: spec.kind,
-          minimum: spec.minimum,
-          maximum: spec.maximum,
-          step: spec.step,
-          integer: spec.integer,
-          unit: spec.unit,
-        }
-      : spec.kind === "enum"
-        ? { kind: spec.kind, options: spec.options.map(({ value, label }) => ({ value, label })) }
-        : spec.kind === "string"
-          ? { kind: spec.kind, maxLength: spec.maxLength }
-          : { kind: spec.kind };
-  const operations: string[] = [];
-  if (characteristic.access.write && spec.kind !== "action") operations.push("set");
-  if (supportsStep(characteristic)) operations.push("step");
-  if (characteristic.access.write && spec.kind === "boolean") operations.push("toggle");
-  if (characteristic.access.write && spec.kind === "action") operations.push("invoke");
-  return {
-    id: characteristic.id,
-    label: characteristic.label,
-    spec: metadata,
-    access: {
-      read: characteristic.access.read,
-      write: characteristic.access.write,
-      notify: characteristic.access.notify,
-    },
-    value: characteristic.value,
-    status: characteristic.status,
-    operations,
-    defaultCommand: defaultCommand(characteristic),
-    error: characteristic.error ? { code: characteristic.error.code, message: characteristic.error.message } : null,
-  };
 }
 
 /** One demand-owned subscription; all visible keys, dials and the open PI share accepted state. */
@@ -135,8 +109,7 @@ export class Contexts {
     }
     const inspector = this.inspectors.get(id);
     if (inspector) {
-      inspector.settings = settings;
-      inspector.version += 1;
+      inspector.selection = selectionFromSettings(settings);
       this.queueCatalog(inspector);
     }
   }
@@ -148,34 +121,22 @@ export class Contexts {
       inspector.action.manifestId === action.manifestId &&
       inspector.action.device.id === action.device.id
     ) {
-      // Match SDK3's current-PI appearance stack, including overlapping same-context events.
       inspector.appearances += 1;
     } else {
       for (const id of this.inspectors.keys()) this.retireInspector(id);
+      const settings = this.visible.get(action.id)?.settings ?? {};
       inspector = {
         action,
-        settings: this.visible.get(action.id)?.settings ?? {},
         active: true,
         appearances: 1,
-        version: 0,
         sending: false,
         queued: false,
+        requested: false,
+        selection: selectionFromSettings(settings),
       };
       this.inspectors.set(action.id, inspector);
     }
-    inspector.version += 1;
     this.reconcileDemand();
-    this.queueCatalog(inspector);
-    const version = inspector.version;
-    try {
-      const settings = await action.getSettings();
-      if (inspector.active && inspector.version === version) {
-        inspector.settings = settings;
-        this.queueCatalog(inspector);
-      }
-    } catch {
-      // No hardware read or initialization settings write; the PI can request its own settings.
-    }
   }
 
   inspectorDisappeared(id: string): void {
@@ -195,31 +156,17 @@ export class Contexts {
   inspectorRequest(id: string, payload: unknown): void {
     const inspector = this.inspectors.get(id);
     if (!inspector || !inspector.active || !payload || typeof payload !== "object" || Array.isArray(payload)) return;
-    const request = payload as Record<string, unknown>;
-    if (request.event === "validateCommand") {
-      void this.validateInspectorCommand(inspector, request);
-      return;
-    }
-    if (
-      !["getDevices", "getCharacteristics", "getPressDevices", "getPressCharacteristics", "getCatalog"].includes(
-        String(request.event),
-      )
-    )
-      return;
-    const selection = request.selection;
-    if (selection && typeof selection === "object" && !Array.isArray(selection)) {
-      const fields = selection as Record<string, unknown>;
-      if (
-        ["deviceId", "characteristicId", "pressDeviceId", "pressCharacteristicId"].every(
-          (field) =>
-            typeof fields[field] === "string" &&
-            (fields[field] === "" || /^[a-z][a-z0-9_.-]{0,63}$/.test(fields[field] as string)),
-        )
-      ) {
-        inspector.selection = fields as Inspector["selection"];
+    const request = payload as Partial<InspectorRequest>;
+    if (request.event === "catalog") {
+      if (isSelection(request.selection)) {
+        inspector.requested = true;
+        inspector.selection = request.selection;
+        this.queueCatalog(inspector);
       }
+      return;
     }
-    this.queueCatalog(inspector);
+    if (request.event === "validateCommand")
+      void this.validateInspectorCommand(inspector, request as Record<string, unknown>);
   }
 
   private async validateInspectorCommand(inspector: Inspector, request: Record<string, unknown>): Promise<void> {
@@ -227,41 +174,7 @@ export class Contexts {
     if (typeof request.requestId !== "number" || !Number.isSafeInteger(request.requestId)) return;
     const requestId = request.requestId;
     const slot = request.slot;
-    let command: CharacteristicCommand | null = null;
-    let error: string | null = null;
-    try {
-      const binding = request.binding;
-      if (!isBinding(binding)) throw new Error("Select a device and characteristic first.");
-      const resolved = resolveBinding(this.snapshot, binding);
-      if (!resolved) throw new Error("The selected characteristic is missing.");
-      const characteristic = resolved.characteristic;
-      switch (request.op) {
-        case "default":
-          break;
-        case "set":
-          if (typeof request.text !== "string" || request.text.length > 4096)
-            throw new Error("Enter a bounded characteristic value.");
-          command = { op: "set", value: parseCharacteristicValue(characteristic.spec, request.text) };
-          break;
-        case "step":
-          if (typeof request.text !== "string" || !/^[+-]?\d+$/.test(request.text))
-            throw new Error("Enter a whole step count from -100 to 100.");
-          command = { op: "step", steps: Number(request.text) };
-          break;
-        case "toggle":
-          command = { op: "toggle" };
-          break;
-        case "invoke":
-          command = { op: "invoke" };
-          break;
-        default:
-          throw new Error("Select a supported operation.");
-      }
-      if (command && !isCommandApplicable(characteristic, command))
-        throw new Error("The command is not supported by current metadata.");
-    } catch (failure) {
-      error = failure instanceof Error ? failure.message : "Invalid characteristic command.";
-    }
+    const { command, error } = validateInspectorCommand(this.snapshot, request.binding, request.op, request.text);
     if (!inspector.active || streamDeck.ui.action?.id !== inspector.action.id) return;
     try {
       await streamDeck.ui.sendToPropertyInspector({ event: "commandValidation", slot, requestId, command, error });
@@ -393,7 +306,9 @@ export class Contexts {
         const bindings = [context.settings.binding, context.settings.pressBinding];
         const pending = bindings.some((binding) => binding && this.pending.has(bindingKey(binding)));
         const display = renderDisplay(context.settings, this.snapshot, this.status, pending);
-        if (!context.active) break;
+        if (context.action.isKey() || context.action.isDial()) {
+          await context.action.setImage(keyImage(context.settings, this.snapshot, this.status));
+        }
         if (context.action.isDial()) await context.action.setFeedback(display.feedback);
         else if (context.action.isKey()) await context.action.setTitle(display.title);
       }
@@ -406,7 +321,7 @@ export class Contexts {
 
   private queueCatalog(inspector: Inspector): void {
     inspector.queued = true;
-    if (!inspector.active || inspector.sending) return;
+    if (!inspector.active || !inspector.requested || inspector.sending) return;
     inspector.sending = true;
     void this.catalogLoop(inspector);
   }
@@ -415,65 +330,9 @@ export class Contexts {
     try {
       while (inspector.active && inspector.queued) {
         inspector.queued = false;
-        const settings = inspector.settings;
-        const selection = inspector.selection ?? {
-          deviceId: settings.binding?.deviceId ?? "",
-          characteristicId: settings.binding?.characteristicId ?? "",
-          pressDeviceId: settings.pressBinding?.deviceId ?? "",
-          pressCharacteristicId: settings.pressBinding?.characteristicId ?? "",
-        };
-        const devices = this.snapshot?.devices ?? [];
-        const deviceItems = devices.map((device) => ({
-          value: device.id,
-          label: `${device.label} (${device.kind})${device.status !== "online" ? " — unavailable" : ""}`,
-        }));
-        const withMissing = (
-          items: { value: string; label: string; disabled?: boolean }[],
-          selected: string,
-          placeholder: string,
-        ) => {
-          const result = [{ value: "", label: placeholder }, ...items];
-          if (selected && !result.some((item) => item.value === selected))
-            result.push({ value: selected, label: `Missing: ${selected}`, disabled: true });
-          return result;
-        };
-        const primaryDevice = devices.find((device) => device.id === selection.deviceId);
-        const pressDevice = devices.find((device) => device.id === selection.pressDeviceId);
-        const itemsFor = (device: typeof primaryDevice) =>
-          device?.characteristics.map((characteristic) => ({
-            value: characteristic.id,
-            label: `${characteristic.label}${!characteristic.access.write ? " (read-only)" : ""}${characteristic.status !== "ok" ? ` — ${characteristic.status}` : ""}`,
-          })) ?? [];
-        const primary = primaryDevice?.characteristics.find((item) => item.id === selection.characteristicId);
-        const press = pressDevice?.characteristics.find((item) => item.id === selection.pressCharacteristicId);
-        const payloads = [
-          { event: "getDevices", items: withMissing(deviceItems, selection.deviceId, "Configure — select device") },
-          {
-            event: "getCharacteristics",
-            items: withMissing(itemsFor(primaryDevice), selection.characteristicId, "Select characteristic"),
-          },
-          {
-            event: "getPressDevices",
-            items: withMissing(deviceItems, selection.pressDeviceId, "Use primary key behavior"),
-          },
-          {
-            event: "getPressCharacteristics",
-            items: withMissing(itemsFor(pressDevice), selection.pressCharacteristicId, "Select press characteristic"),
-          },
-          {
-            event: "catalog",
-            connection: this.status,
-            configurationError: this.configurationError ?? null,
-            selection,
-            primary: inspectorCharacteristic(primary),
-            press: inspectorCharacteristic(press),
-          },
-        ];
-        for (const payload of payloads) {
-          // SDK3 routes to its currently visible PI; check exact action context before every send.
-          if (!inspector.active || streamDeck.ui.action?.id !== inspector.action.id) break;
-          await streamDeck.ui.sendToPropertyInspector(payload);
-        }
+        const catalog = buildCatalog(this.snapshot, this.status, inspector.selection, this.configurationError);
+        if (!inspector.active || streamDeck.ui.action?.id !== inspector.action.id) break;
+        await streamDeck.ui.sendToPropertyInspector({ event: "catalog", ...catalog });
       }
     } catch {
       // A closed/replaced inspector is not a user command failure.

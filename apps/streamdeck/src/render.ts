@@ -1,5 +1,6 @@
 import {
   defaultCommand,
+  formatCharacteristicValue,
   isCommandApplicable,
   type Characteristic,
   type ClientStatus,
@@ -20,18 +21,7 @@ export function resolveBinding(
 }
 
 export function readingText(characteristic: Characteristic): string {
-  if (characteristic.spec.kind === "action") return "Invoke";
-  if (characteristic.value === null) return "Not observed";
-  switch (characteristic.spec.kind) {
-    case "boolean":
-      return characteristic.value === true ? "On" : "Off";
-    case "enum":
-      return characteristic.spec.options.find((option) => option.value === characteristic.value)?.label ?? "Unknown";
-    case "number":
-      return `${characteristic.value}${characteristic.spec.unit ? ` ${characteristic.spec.unit}` : ""}`;
-    case "string":
-      return characteristic.value === "" ? "(empty)" : String(characteristic.value);
-  }
+  return formatCharacteristicValue(characteristic);
 }
 
 function unavailableText(device: Device, characteristic: Characteristic): string | undefined {
@@ -42,7 +32,14 @@ function unavailableText(device: Device, characteristic: Characteristic): string
   return undefined;
 }
 
-export type Display = { title: string; feedback: FeedbackPayload };
+export type DisplayFeedback = {
+  title: string;
+  current: string;
+  minimum: { value: string; enabled: boolean };
+  maximum: { value: string; enabled: boolean };
+  bar: { value: number; enabled: boolean };
+};
+export type Display = { title: string; feedback: DisplayFeedback };
 
 export function renderDisplay(
   settings: ActionSettings,
@@ -57,12 +54,12 @@ export function renderDisplay(
   let maximum = "";
   let percent = 0;
   let bounded = false;
-  const resolved = resolveBinding(snapshot, settings.binding);
   if (!settingsConform(settings)) {
     current = "Unsupported";
   } else if (!settings.binding) {
     current = "Configure";
   } else {
+    const resolved = resolveBinding(snapshot, settings.binding);
     const service =
       connection === "incompatible"
         ? "Incompatible"
@@ -73,6 +70,7 @@ export function renderDisplay(
             : undefined;
     if (!resolved) {
       current = service ?? "Missing";
+      state = service ?? "Missing";
     } else {
       const { device, characteristic } = resolved;
       label = characteristic.label;
@@ -129,14 +127,15 @@ export function renderDisplay(
     }
   }
   const heading = state ? `${label} · ${state}` : label;
+  const feedback = {
+    title: heading,
+    current,
+    minimum: { value: minimum, enabled: bounded },
+    maximum: { value: maximum, enabled: bounded },
+    bar: { value: percent, enabled: bounded },
+  } satisfies FeedbackPayload & DisplayFeedback;
   return {
     title: `${heading}\n${current}`,
-    feedback: {
-      title: heading,
-      current,
-      minimum: { value: minimum, enabled: bounded },
-      maximum: { value: maximum, enabled: bounded },
-      bar: { value: percent, enabled: bounded },
-    },
+    feedback,
   };
 }

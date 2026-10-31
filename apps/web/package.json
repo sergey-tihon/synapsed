@@ -8,8 +8,10 @@
     "node": ">=24"
   },
   "scripts": {
-    "build": "tsc --noEmit && vite build",
-    "dev": "vite"
+    "build": "npm run typecheck && vite build",
+    "dev": "vite",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "@synapsed/client": "0.1.0",
@@ -18,7 +20,9 @@
   },
   "devDependencies": {
     "@solidjs/vite-plugin": "3.0.0-next.35",
+    "jsdom": "26.1.0",
+    "typescript": "5.9.3",
     "vite": "8.2.1",
-    "typescript": "5.9.3"
+    "vitest": "3.2.4"
   }
 }

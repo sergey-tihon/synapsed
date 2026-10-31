@@ -13,8 +13,8 @@ use std::{
 };
 use synapsed_api::{
     ApiError, Characteristic, CharacteristicCommand, CharacteristicSpec, CharacteristicValue,
-    DeviceResponse, ErrorCode, ErrorResponse, LogEntry, LogsResponse, MAX_COMMAND_BYTES,
-    ServerEvent, Snapshot, StatusResponse, parse_revision,
+    DeviceResponse, ErrorCode, ErrorResponse, InventoryResponse, LogEntry, LogsResponse,
+    MAX_COMMAND_BYTES, ServerEvent, Snapshot, StatusResponse, parse_revision,
 };
 use tokio::{
     net::TcpStream,
@@ -166,6 +166,8 @@ struct Inner {
     http: reqwest::Client,
     ordering: Mutex<Ordering>,
     changed: watch::Sender<u64>,
+    socket_idle_timeout: Duration,
+    request_timeout: Duration,
 }
 impl Inner {
     fn state(&self) -> MutexGuard<'_, Ordering> {
@@ -198,13 +200,30 @@ impl Inner {
 }
 impl Client {
     pub fn new(endpoint: Url) -> Result<Self, ClientError> {
+        Self::with_socket_idle_timeout(endpoint, SOCKET_IDLE_TIMEOUT)
+    }
+    /// Create a client with an explicit WebSocket inactivity deadline.
+    #[doc(hidden)]
+    pub fn with_socket_idle_timeout(
+        endpoint: Url,
+        socket_idle_timeout: Duration,
+    ) -> Result<Self, ClientError> {
+        Self::with_timeouts(endpoint, REQUEST_TIMEOUT, socket_idle_timeout)
+    }
+    /// Create a client with injected operation and WebSocket timeouts for tests.
+    #[doc(hidden)]
+    pub fn with_timeouts(
+        endpoint: Url,
+        request_timeout: Duration,
+        socket_idle_timeout: Duration,
+    ) -> Result<Self, ClientError> {
         validate_endpoint(&endpoint)?;
         let http = reqwest::Client::builder()
             .no_proxy()
             .redirect(reqwest::redirect::Policy::none())
             .retry(reqwest::retry::never())
-            .timeout(REQUEST_TIMEOUT)
-            .connect_timeout(REQUEST_TIMEOUT)
+            .timeout(request_timeout)
+            .connect_timeout(request_timeout)
             .build()
             .map_err(|_| ClientError::Config("Cannot initialize HTTP client."))?;
         let (changed, _) = watch::channel(0);
@@ -216,6 +235,8 @@ impl Client {
                 http,
                 ordering: Mutex::new(ordering),
                 changed,
+                socket_idle_timeout,
+                request_timeout,
             }),
         })
     }
@@ -260,8 +281,12 @@ impl Client {
         loop {
             self.inner.state().check()?;
             tokio::select! {
-                result = &mut future => return result,
-                _ = changed.changed() => { self.inner.state().check()?; }
+                result = &mut future => {
+                    return result;
+                }
+                _ = changed.changed() => {
+                    self.inner.state().check()?;
+                }
             }
         }
     }
@@ -331,13 +356,23 @@ impl Client {
         let identity = state.http_identity(generation, &response.node.instance_id);
         self.inner.notify(state.generation);
         identity?;
-        if let Some(snapshot) = &state.snapshot {
-            if parse_revision(&response.revision).unwrap()
+        if let Some(snapshot) = &state.snapshot
+            && parse_revision(&response.revision).unwrap()
                 < parse_revision(&snapshot.revision).unwrap()
-            {
-                return Err(ClientError::Stale);
-            }
+        {
+            return Err(ClientError::Stale);
         }
+        Ok(response)
+    }
+    pub async fn inventory(&self) -> Result<InventoryResponse, ClientError> {
+        let (generation, response) = self
+            .request::<InventoryResponse>(self.inner.http.get(self.route(&[
+                "api",
+                "v1",
+                "inventory",
+            ])))
+            .await?;
+        self.identity(generation, &response.instance_id)?;
         Ok(response)
     }
     pub async fn snapshot(&self) -> Result<Arc<Snapshot>, ClientError> {
@@ -370,19 +405,18 @@ impl Client {
             self.inner.notify(state.generation);
             return Err(error);
         }
-        if let Some(snapshot) = &state.snapshot {
-            if parse_revision(&response.revision).unwrap()
+        if let Some(snapshot) = &state.snapshot
+            && parse_revision(&response.revision).unwrap()
                 < parse_revision(&snapshot.revision).unwrap()
-            {
-                response.device = snapshot
-                    .devices
-                    .iter()
-                    .find(|device| device.id == device_id)
-                    .cloned()
-                    .ok_or(ClientError::Stale)?;
-                response.node = snapshot.node.clone();
-                response.revision = snapshot.revision.clone();
-            }
+        {
+            response.device = snapshot
+                .devices
+                .iter()
+                .find(|device| device.id == device_id)
+                .cloned()
+                .ok_or(ClientError::Stale)?;
+            response.node = snapshot.node.clone();
+            response.revision = snapshot.revision.clone();
         }
         Ok(response)
     }
@@ -441,50 +475,47 @@ impl Client {
         let config = WebSocketConfig::default()
             .max_message_size(Some(MAX_RESPONSE_BYTES))
             .max_frame_size(Some(MAX_RESPONSE_BYTES));
-        let result = self
-            .cancellable(async {
-                let connection = timeout(
-                    REQUEST_TIMEOUT,
-                    connect_async_with_config(endpoint.as_str(), Some(config), false),
-                )
+        self.cancellable(async {
+            let connection = timeout(
+                self.inner.request_timeout,
+                connect_async_with_config(endpoint.as_str(), Some(config), false),
+            )
+            .await
+            .map_err(|_| ClientError::Timeout)
+            .and_then(|result| result.map_err(socket_error));
+            let (socket, _) = connection.inspect_err(|error| {
+                if error.is_terminal() {
+                    self.inner.fail_socket(token, error);
+                }
+            })?;
+            let (receiver, task) = transport::start(socket, self.clone(), token);
+            let mut stream = EventStream {
+                guard,
+                receiver,
+                task,
+                initial: None,
+                changed: self.inner.changed.subscribe(),
+                finished: false,
+            };
+            let event = timeout(self.inner.request_timeout, stream.read_event())
                 .await
-                .map_err(|_| ClientError::Timeout)
-                .and_then(|result| result.map_err(socket_error));
-                let (socket, _) = connection.map_err(|error| {
-                    if error.is_terminal() {
-                        self.inner.fail_socket(token, &error);
-                    }
-                    error
-                })?;
-                let (receiver, task) = transport::start(socket, self.clone(), token);
-                let mut stream = EventStream {
-                    guard,
-                    receiver,
-                    task,
-                    initial: None,
-                    changed: self.inner.changed.subscribe(),
-                    finished: false,
-                };
-                let event = timeout(REQUEST_TIMEOUT, stream.read_event())
-                    .await
-                    .map_err(|_| ClientError::Timeout)??
-                    .ok_or(ClientError::Network)?;
-                let ServerEvent::Snapshot { snapshot } = event else {
-                    let error = ClientError::Protocol("First WebSocket event must be a snapshot.");
-                    self.inner.fail_socket(token, &error);
-                    return Err(error);
-                };
-                let snapshot = {
-                    let mut state = self.inner.state();
-                    let snapshot = state.initial(token, snapshot)?;
-                    self.inner.notify(state.generation);
-                    snapshot
-                };
-                stream.initial = Some(snapshot);
-                Ok(stream)
-            })
-            .await;
-        result
+                .map_err(|_| ClientError::Timeout)??
+                .ok_or(ClientError::Network)?;
+            let ServerEvent::Snapshot { snapshot } = event else {
+                let error = ClientError::Protocol("First WebSocket event must be a snapshot.");
+                self.inner.fail_socket(token, &error);
+                return Err(error);
+            };
+            let snapshot = {
+                let mut state = self.inner.state();
+                let snapshot = state.initial(token, snapshot)?;
+                self.inner.notify(state.generation);
+                snapshot
+            };
+            stream.initial = Some(snapshot);
+            Ok(stream)
+        })
+        .await
     }
 }
 fn http_error(error: reqwest::Error) -> ClientError {
@@ -498,12 +529,11 @@ fn socket_error(error: tungstenite::Error) -> ClientError {
     match error {
         tungstenite::Error::Http(response) => {
             let status = response.status().as_u16();
-            if let Some(bytes) = response.body() {
-                if let Ok(envelope) = wire::decode::<ErrorResponse>(bytes) {
-                    if envelope.error.code.http_status() == status {
-                        return ClientError::Api(envelope.error);
-                    }
-                }
+            if let Some(bytes) = response.body()
+                && let Ok(envelope) = wire::decode::<ErrorResponse>(bytes)
+                && envelope.error.code.http_status() == status
+            {
+                return ClientError::Api(envelope.error);
             }
             ClientError::Protocol(
                 "WebSocket upgrade was refused with an incompatible error response.",
@@ -548,8 +578,12 @@ impl EventStream {
                 .state()
                 .check_socket(self.guard.token)?;
             let event = tokio::select! {
-                result = self.receiver.recv() => result,
-                _ = self.changed.changed() => continue,
+                result = self.receiver.recv() => {
+                    result
+                }
+                _ = self.changed.changed() => {
+                    continue;
+                }
             };
             self.guard
                 .client

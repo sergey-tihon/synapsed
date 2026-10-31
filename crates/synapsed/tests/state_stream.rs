@@ -116,15 +116,20 @@ async fn two_clients_relative_writes_serialize_and_websocket_observes() {
         })
         .await;
     assert!(observed.revision.parse::<u64>().unwrap() > initial.revision.parse::<u64>().unwrap());
-    assert_eq!(
-        fixture.hardware.lock().unwrap().writes,
-        [(0x10, 45), (0x10, 50)]
-    );
+    let writes = fixture
+        .hardware
+        .lock()
+        .unwrap()
+        .set_calls
+        .iter()
+        .map(|(_, code, value)| (*code, *value))
+        .collect::<Vec<_>>();
+    assert_eq!(writes, [(0x10, 45), (0x10, 50)]);
     loop {
-        if let ServerEvent::Snapshot { snapshot } = next_event(&mut socket).await {
-            if value(&snapshot, "brightness") == Some(CharacteristicValue::Number(50.0)) {
-                break;
-            }
+        if let ServerEvent::Snapshot { snapshot } = next_event(&mut socket).await
+            && value(&snapshot, "brightness") == Some(CharacteristicValue::Number(50.0))
+        {
+            break;
         }
     }
     socket.close(None).await.unwrap();
@@ -138,11 +143,8 @@ async fn polling_observes_external_changes_without_subscribers() {
             value(snapshot, "brightness") == Some(CharacteristicValue::Number(40.0))
         })
         .await;
-    fixture
-        .hardware
-        .lock()
-        .unwrap()
-        .registers
+    fixture.hardware.lock().unwrap().endpoints[0]
+        .replies
         .get_mut(&0x10)
         .unwrap()
         .current = 55;
@@ -156,7 +158,7 @@ async fn polling_observes_external_changes_without_subscribers() {
         observed.devices[0].characteristics[0].status,
         CharacteristicStatus::Ok
     );
-    assert!(fixture.hardware.lock().unwrap().writes.is_empty());
+    assert!(fixture.hardware.lock().unwrap().set_calls.is_empty());
     fixture.server.shutdown().await.unwrap();
 }
 #[tokio::test]
@@ -182,7 +184,7 @@ async fn packed_observations_and_coerced_readback_are_authoritative() {
         Some(CharacteristicValue::Boolean(false))
     );
     assert_eq!(
-        fixture.hardware.lock().unwrap().registers[&0xd7].current,
+        fixture.hardware.lock().unwrap().endpoints[0].replies[&0xd7].current,
         0x0110
     );
     let response = fixture
@@ -202,10 +204,10 @@ async fn packed_observations_and_coerced_readback_are_authoritative() {
         Some(CharacteristicValue::Number(3.0))
     );
     assert_eq!(
-        fixture.hardware.lock().unwrap().registers[&0xd9].current,
+        fixture.hardware.lock().unwrap().endpoints[0].replies[&0xd9].current,
         0x0306
     );
-    fixture.hardware.lock().unwrap().coerce = Some(57);
+    fixture.hardware.lock().unwrap().coercion.insert(0x10, 57);
     let response = fixture
         .execute("brightness", serde_json::json!({"op":"set","value":60}))
         .await;
@@ -229,20 +231,17 @@ async fn failed_fresh_read_never_writes_and_later_observation_recovers() {
             value(snapshot, "brightness") == Some(CharacteristicValue::Number(40.0))
         })
         .await;
-    fixture.hardware.lock().unwrap().failures.insert(0x10);
+    fixture.hardware.lock().unwrap().fail_reads.insert(0x10);
     let response = fixture
         .execute("brightness", serde_json::json!({"op":"step","steps":1}))
         .await;
     assert_eq!(response.status(), 503);
     let error: ErrorResponse = response.json().await.unwrap();
     error.validate().unwrap();
-    assert!(fixture.hardware.lock().unwrap().writes.is_empty());
-    fixture.hardware.lock().unwrap().failures.clear();
-    fixture
-        .hardware
-        .lock()
-        .unwrap()
-        .registers
+    assert!(fixture.hardware.lock().unwrap().set_calls.is_empty());
+    fixture.hardware.lock().unwrap().fail_reads.clear();
+    fixture.hardware.lock().unwrap().endpoints[0]
+        .replies
         .get_mut(&0x10)
         .unwrap()
         .current = 51;
@@ -266,7 +265,7 @@ async fn vendor_failure_retains_healthy_brightness_through_lua_refresh() {
                 && value(snapshot, "brightness").is_some()
         })
         .await;
-    fixture.hardware.lock().unwrap().failures.insert(0xd9);
+    fixture.hardware.lock().unwrap().fail_reads.insert(0xd9);
     let response = fixture
         .execute("brightness", serde_json::json!({"op":"set","value":52}))
         .await;

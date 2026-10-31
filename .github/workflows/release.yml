@@ -19,8 +19,6 @@ jobs:
             target: aarch64-apple-darwin
           - runner: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
-          - runner: ubuntu-24.04-arm
-            target: aarch64-unknown-linux-gnu
     runs-on: ${{ matrix.runner }}
     env:
       MACOSX_DEPLOYMENT_TARGET: "12.0"
@@ -31,6 +29,9 @@ jobs:
           node-version: 24
           cache: npm
       - uses: dtolnay/rust-toolchain@1.90.0
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
       - run: npm ci
       - run: node scripts/workspace.mjs check-release "$GITHUB_REF_NAME"
       - run: npm test

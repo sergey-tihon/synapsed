@@ -8,11 +8,11 @@ const DEFAULT_ENDPOINT = "http://127.0.0.1:24816";
 const CONFIG_LIMIT = 64 * 1024;
 
 /** Only the public client configuration is read, never daemon settings or credentials. */
-export async function loadEndpoint(): Promise<string> {
-  if (process.env.SYNAPSED_ENDPOINT !== undefined) {
-    return validateBaseUrl(process.env.SYNAPSED_ENDPOINT).origin;
+export async function loadEndpoint(environment: NodeJS.ProcessEnv = process.env): Promise<string> {
+  if (environment.SYNAPSED_ENDPOINT !== undefined) {
+    return validateBaseUrl(environment.SYNAPSED_ENDPOINT).origin;
   }
-  const configHome = process.env.XDG_CONFIG_HOME || path.join(homedir(), ".config");
+  const configHome = environment.XDG_CONFIG_HOME || path.join(homedir(), ".config");
   const filename = path.join(configHome, "synapsed", "client.toml");
   let file;
   try {

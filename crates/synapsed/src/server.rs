@@ -1,5 +1,6 @@
 use crate::{
     access::{AccessPolicy, error_response, preflight},
+    inventory::{Inventory, Sources},
     logs::LogRing,
 };
 use axum::{
@@ -47,27 +48,41 @@ pub struct Application {
 }
 struct Inner {
     store: StateStore,
+    inventory: Sources,
+    frame: Mutex<Option<SnapshotFrame>>,
     host: PluginHost,
     logs: LogRing,
     accepting: AtomicBool,
     stopping: watch::Sender<bool>,
-    frame: Mutex<Option<SnapshotFrame>>,
+    heartbeat_interval: Duration,
 }
 struct SnapshotFrame {
     encoded: Arc<[u8]>,
     text: Utf8Bytes,
 }
 impl Application {
-    pub fn new(store: StateStore, host: PluginHost, logs: LogRing) -> Self {
+    pub fn new(store: StateStore, host: PluginHost, logs: LogRing, inventory: Sources) -> Self {
+        Self::new_with_heartbeat_interval(store, host, logs, inventory, Duration::from_secs(30))
+    }
+    #[doc(hidden)]
+    pub fn new_with_heartbeat_interval(
+        store: StateStore,
+        host: PluginHost,
+        logs: LogRing,
+        inventory: Sources,
+        heartbeat_interval: Duration,
+    ) -> Self {
         let (stopping, _) = watch::channel(false);
         Self {
             inner: Arc::new(Inner {
                 store,
+                inventory,
                 host,
                 logs,
                 accepting: AtomicBool::new(true),
                 stopping,
                 frame: Mutex::new(None),
+                heartbeat_interval,
             }),
         }
     }
@@ -80,6 +95,7 @@ impl Application {
     pub fn router(&self, policy: AccessPolicy) -> Router {
         Router::new()
             .route("/api/v1/status", get(status).options(preflight))
+            .route("/api/v1/inventory", get(inventory).options(preflight))
             .route("/api/v1/devices", get(snapshot).options(preflight))
             .route(
                 "/api/v1/devices/{device_id}",
@@ -107,8 +123,10 @@ impl Application {
             self.inner
                 .logs
                 .record(LogLevel::Info, "synapsed", "Daemon shutdown started.");
-            self.inner.stopping.send_replace(true);
         }
+    }
+    fn stop_server(&self) {
+        self.inner.stopping.send_replace(true);
     }
     async fn stopped(&self) {
         let mut stopping = self.inner.stopping.subscribe();
@@ -138,10 +156,10 @@ impl Application {
             .frame
             .lock()
             .expect("snapshot frame mutex poisoned");
-        if let Some(frame) = &*cached {
-            if Arc::ptr_eq(&frame.encoded, &encoded) {
-                return frame.text.clone();
-            }
+        if let Some(frame) = &*cached
+            && Arc::ptr_eq(&frame.encoded, &encoded)
+        {
+            return frame.text.clone();
         }
         // StateStore serialized the validated immutable snapshot once. Only the event
         // envelope is added here, once per publication, and shared by WS subscribers.
@@ -207,16 +225,16 @@ impl RunningServer {
     pub async fn shutdown(&mut self) -> Result<(), ApiError> {
         let deadline = Instant::now() + SHUTDOWN_TIMEOUT;
         self.application.begin_shutdown();
-        let host = self.application.clone();
-        let task = &mut self.task;
-        let server_finished = task.is_finished();
-        let (host_result, server_result) = tokio::join!(host.shutdown_host(deadline), async {
-            // A run_until-completed JoinHandle must not be polled a second time.
-            if server_finished {
-                return Ok(());
-            }
-            match tokio::time::timeout(deadline.saturating_duration_since(Instant::now()), task)
-                .await
+        let host_result = self.application.shutdown_host(deadline).await;
+        self.application.stop_server();
+        let server_result = if self.task.is_finished() {
+            Ok(())
+        } else {
+            match tokio::time::timeout(
+                deadline.saturating_duration_since(Instant::now()),
+                &mut self.task,
+            )
+            .await
             {
                 Ok(Ok(Ok(()))) => Ok(()),
                 Ok(_) => Err(ApiError::new(
@@ -228,11 +246,15 @@ impl RunningServer {
                     "Local API shutdown deadline expired.",
                 )),
             }
-        });
+        };
         self.observer.abort();
         if host_result.is_err() || server_result.is_err() {
             self.task.abort();
-            self.application.logs().record(LogLevel::Error, "synapsed", "Shutdown incomplete; started native writes or plugin finalizers may have unknown outcomes.");
+            self.application.logs().record(
+                LogLevel::Error,
+                "synapsed",
+                "Shutdown incomplete; started native writes or plugin finalizers may have unknown outcomes.",
+            );
         } else {
             self.application.logs().record(
                 LogLevel::Info,
@@ -246,6 +268,7 @@ impl RunningServer {
 impl Drop for RunningServer {
     fn drop(&mut self) {
         self.application.begin_shutdown();
+        self.application.stop_server();
         self.task.abort();
         self.observer.abort();
     }
@@ -284,7 +307,14 @@ async fn observe_driver_status(application: Application) {
             }
         }
         previous = current;
-        tokio::select! { _ = stopping.changed() => break, result = snapshots.changed() => if result.is_err() { break; } }
+        tokio::select! {
+            _ = stopping.changed() => break,
+            result = snapshots.changed() => {
+                if result.is_err() {
+                    break;
+                }
+            }
+        }
     }
 }
 async fn reject_shutdown(
@@ -311,6 +341,16 @@ async fn snapshot(State(application): State<Application>) -> Response {
     )
         .into_response()
 }
+async fn inventory(State(application): State<Application>) -> Response {
+    let response = Inventory::collect(&application.inner.inventory).await;
+    match response.validate() {
+        Ok(()) => axum::Json(response).into_response(),
+        Err(_) => error_response(ApiError::new(
+            ErrorCode::DeviceUnavailable,
+            "Inventory response could not be validated.",
+        )),
+    }
+}
 async fn device(State(application): State<Application>, Path(device_id): Path<String>) -> Response {
     let snapshot = application.store().snapshot();
     match snapshot
@@ -330,40 +370,29 @@ async fn device(State(application): State<Application>, Path(device_id): Path<St
         )),
     }
 }
-async fn execute(
-    State(application): State<Application>,
-    Path((device_id, characteristic_id)): Path<(String, String)>,
-    request: Request,
-) -> Response {
-    if !application.inner.accepting.load(Ordering::Acquire) {
-        return error_response(ApiError::new(
-            ErrorCode::DeviceUnavailable,
-            "Daemon is shutting down.",
-        ));
-    }
-    let current = application.store().snapshot();
-    let Some(device) = current.devices.iter().find(|device| device.id == device_id) else {
-        return error_response(ApiError::new(
-            ErrorCode::UnknownDevice,
-            "Device does not exist.",
-        ));
-    };
-    let Some(characteristic) = device
+fn lookup<'a>(
+    snapshot: &'a synapsed_api::Snapshot,
+    device_id: &str,
+    characteristic_id: &str,
+) -> Result<(&'a synapsed_api::Device, &'a synapsed_api::Characteristic), ApiError> {
+    let device = snapshot
+        .devices
+        .iter()
+        .find(|device| device.id == device_id)
+        .ok_or_else(|| ApiError::new(ErrorCode::UnknownDevice, "Device does not exist."))?;
+    let characteristic = device
         .characteristics
         .iter()
         .find(|characteristic| characteristic.id == characteristic_id)
-    else {
-        return error_response(ApiError::new(
-            ErrorCode::UnknownCharacteristic,
-            "Characteristic does not exist.",
-        ));
-    };
-    if device.status != DeviceStatus::Online {
-        return error_response(ApiError::new(
-            ErrorCode::DeviceUnavailable,
-            "Device is unavailable.",
-        ));
-    }
+        .ok_or_else(|| {
+            ApiError::new(
+                ErrorCode::UnknownCharacteristic,
+                "Characteristic does not exist.",
+            )
+        })?;
+    Ok((device, characteristic))
+}
+async fn require_json_body(request: Request) -> Result<Bytes, ApiError> {
     let content_type = request
         .headers()
         .get(header::CONTENT_TYPE)
@@ -374,30 +403,47 @@ async fn execute(
         .next()
         .is_some_and(|mime| mime.trim().eq_ignore_ascii_case("application/json"))
     {
-        return error_response(ApiError::new(
+        return Err(ApiError::new(
             ErrorCode::InvalidRequest,
             "Command requires application/json.",
         ));
     }
-    let bytes = match tokio::time::timeout(
+    match tokio::time::timeout(
         Duration::from_secs(5),
         to_bytes(request.into_body(), synapsed_api::MAX_COMMAND_BYTES),
     )
     .await
     {
-        Ok(Ok(bytes)) => bytes,
-        Ok(Err(_)) => {
-            return error_response(ApiError::new(
-                ErrorCode::InvalidRequest,
-                "Command is unreadable or exceeds 16 KiB.",
-            ));
-        }
-        Err(_) => {
-            return error_response(ApiError::new(
-                ErrorCode::Timeout,
-                "Command body deadline expired.",
-            ));
-        }
+        Ok(Ok(bytes)) => Ok(bytes),
+        Ok(Err(_)) => Err(ApiError::new(
+            ErrorCode::InvalidRequest,
+            "Command is unreadable or exceeds 16 KiB.",
+        )),
+        Err(_) => Err(ApiError::new(
+            ErrorCode::Timeout,
+            "Command body deadline expired.",
+        )),
+    }
+}
+async fn execute(
+    State(application): State<Application>,
+    Path((device_id, characteristic_id)): Path<(String, String)>,
+    request: Request,
+) -> Response {
+    let current = application.store().snapshot();
+    let (device, characteristic) = match lookup(&current, &device_id, &characteristic_id) {
+        Ok(found) => found,
+        Err(error) => return error_response(error),
+    };
+    if device.status != DeviceStatus::Online {
+        return error_response(ApiError::new(
+            ErrorCode::DeviceUnavailable,
+            "Device is unavailable.",
+        ));
+    }
+    let bytes = match require_json_body(request).await {
+        Ok(bytes) => bytes,
+        Err(error) => return error_response(error),
     };
     let command = match CharacteristicCommand::from_json(&bytes).and_then(|command| {
         characteristic.validate_command(&command)?;
@@ -457,12 +503,6 @@ async fn fallback(request: Request) -> Response {
     }
 }
 async fn events(State(application): State<Application>, upgrade: WebSocketUpgrade) -> Response {
-    if !application.inner.accepting.load(Ordering::Acquire) {
-        return error_response(ApiError::new(
-            ErrorCode::DeviceUnavailable,
-            "Daemon is shutting down.",
-        ));
-    }
     upgrade
         .max_message_size(WS_LIMIT)
         .max_frame_size(WS_LIMIT)
@@ -488,8 +528,12 @@ fn log_frame(event: ServerEvent) -> Message {
 async fn stream_events(socket: WebSocket, application: Application) {
     // Subscribe first; entries appended while taking the ring are deduplicated below.
     let mut live_logs = application.logs().subscribe();
-    let recent = application.logs().recent();
-    let mut last_log = recent.last().and_then(|entry| entry.id.parse::<u64>().ok());
+    let recent_with_sequence = application.logs().recent_with_sequence();
+    let recent: Vec<_> = recent_with_sequence
+        .iter()
+        .map(|(_, entry)| entry.clone())
+        .collect();
+    let mut last_log = recent_with_sequence.last().map(|(sequence, _)| *sequence);
     let mut changes = application.store().subscribe();
     let mut stopping = application.inner.stopping.subscribe();
     let (mut outgoing, mut incoming) = socket.split();
@@ -517,9 +561,10 @@ async fn stream_events(socket: WebSocket, application: Application) {
     {
         return;
     }
+    let heartbeat_interval = application.inner.heartbeat_interval;
     let mut ping = tokio::time::interval_at(
-        tokio::time::Instant::now() + Duration::from_secs(30),
-        Duration::from_secs(30),
+        tokio::time::Instant::now() + heartbeat_interval,
+        heartbeat_interval,
     );
     ping.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut ping_sequence = 0u64;
@@ -555,8 +600,7 @@ async fn stream_events(socket: WebSocket, application: Application) {
                 if !send(&mut outgoing, Message::Text(application.snapshot_frame())).await { break; }
             },
             event = live_logs.recv() => match event {
-                Ok(entry) => {
-                    let sequence = entry.id.parse::<u64>().expect("host log ID is decimal");
+                Ok((sequence, entry)) => {
                     if last_log.is_some_and(|last| sequence <= last) { continue; }
                     last_log = Some(sequence);
                     if !send(&mut outgoing, log_frame(ServerEvent::Log { entry })).await { break; }

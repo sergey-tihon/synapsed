@@ -7,9 +7,10 @@ import type { Characteristic } from "./Characteristic.js";
 import type { CharacteristicCommand } from "./CharacteristicCommand.js";
 import type { ServerEvent } from "./ServerEvent.js";
 import type { ErrorResponse } from "./ErrorResponse.js";
-import { checkSnapshot, checkStatusResponse, checkDeviceResponse, checkLogsResponse, checkCharacteristic, checkCharacteristicCommand, checkServerEvent, checkErrorResponse } from "./standalone.js";
+import type { InventoryResponse } from "./InventoryResponse.js";
+import { checkSnapshot, checkStatusResponse, checkDeviceResponse, checkLogsResponse, checkCharacteristic, checkCharacteristicCommand, checkServerEvent, checkErrorResponse, checkInventoryResponse } from "./standalone.js";
 
-export type ApiSchemaName = "Snapshot" | "StatusResponse" | "DeviceResponse" | "LogsResponse" | "Characteristic" | "CharacteristicCommand" | "ServerEvent" | "ErrorResponse";
+export type ApiSchemaName = "Snapshot" | "StatusResponse" | "DeviceResponse" | "LogsResponse" | "Characteristic" | "CharacteristicCommand" | "ServerEvent" | "ErrorResponse" | "InventoryResponse";
 
 // Do not expose Ajv's errors, paths, parameters, or the rejected payload.
 export class ProtocolValidationError extends Error {
@@ -107,5 +108,16 @@ export function isErrorResponse(value: unknown): value is ErrorResponse {
 
 export function validateErrorResponse(value: unknown): ErrorResponse {
   if (!isErrorResponse(value)) throw new ProtocolValidationError("ErrorResponse");
+  return value;
+}
+
+export function isInventoryResponse(value: unknown): value is InventoryResponse {
+  const valid = checkInventoryResponse(value);
+  checkInventoryResponse.errors = null;
+  return valid;
+}
+
+export function validateInventoryResponse(value: unknown): InventoryResponse {
+  if (!isInventoryResponse(value)) throw new ProtocolValidationError("InventoryResponse");
   return value;
 }

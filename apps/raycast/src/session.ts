@@ -3,7 +3,6 @@ import { showToast, Toast } from "@raycast/api";
 import {
   createClient,
   isCommandApplicable,
-  type Characteristic,
   type CharacteristicCommand,
   type ClientStatus,
   type Snapshot,
@@ -11,6 +10,7 @@ import {
   type SynapsedClient,
 } from "@synapsed/client";
 
+import { bindingKey, dispatchPrecondition } from "./model";
 export interface ViewState {
   snapshot?: Snapshot;
   status?: StatusResponse;
@@ -18,18 +18,7 @@ export interface ViewState {
   error?: string;
   pending: ReadonlySet<string>;
 }
-export const bindingKey = (deviceId: string, characteristicId: string) => JSON.stringify([deviceId, characteristicId]);
-export function displayValue(characteristic: Characteristic): string {
-  if (characteristic.spec.kind === "action") return "Action";
-  if (characteristic.value === null) return "Not observed";
-  if (characteristic.spec.kind === "enum")
-    return (
-      characteristic.spec.options.find((option) => option.value === characteristic.value)?.label ??
-      String(characteristic.value)
-    );
-  const unit = characteristic.spec.kind === "number" ? characteristic.spec.unit : null;
-  return `${String(characteristic.value)}${unit ? ` ${unit}` : ""}`;
-}
+export { bindingKey, displayValue } from "./model";
 export class Session {
   private client?: SynapsedClient;
   private abort?: AbortController;
@@ -66,10 +55,11 @@ export class Session {
           this.update({ connection });
           const readGeneration = ++this.readGeneration;
           if (connection !== "connected") return;
-          // A valid socket snapshot has elected the request epoch. Starting
-          // here avoids knowingly obsolete startup reads and binds their
-          // errors to this connection, rather than a later reconnect.
-          void this.client!.getStatus({ signal: this.abort!.signal })
+          const client = this.client;
+          const signal = this.abort?.signal;
+          if (!client || !signal) return;
+          void client
+            .getStatus({ signal })
             .then((status) => {
               if (
                 this.live &&
@@ -83,7 +73,7 @@ export class Session {
               if (this.live && generation === this.generation && readGeneration === this.readGeneration)
                 this.update({ error: error.message });
             });
-          void this.client!.getSnapshot({ signal: this.abort!.signal }).catch((error: Error) => {
+          void client.getSnapshot({ signal }).catch((error: Error) => {
             if (this.live && generation === this.generation && readGeneration === this.readGeneration)
               this.update({ error: error.message });
           });
@@ -91,8 +81,6 @@ export class Session {
         onError: (error) => {
           if (this.live && generation === this.generation) this.update({ error: error.message });
         },
-        onLogs: () => {},
-        onLog: () => {},
       });
     } catch (error) {
       this.update({
@@ -110,20 +98,22 @@ export class Session {
     this.busy.clear();
   }
   async execute(deviceId: string, characteristicId: string, command: CharacteristicCommand): Promise<boolean> {
-    const key = bindingKey(deviceId, characteristicId);
-    if (this.busy.has(key)) return false;
     const snapshot = this.state.snapshot;
     const device = snapshot?.devices.find((item) => item.id === deviceId);
     const characteristic = device?.characteristics.find((item) => item.id === characteristicId);
+    const client = this.client;
+    const key = bindingKey(deviceId, characteristicId);
     if (
-      !this.live ||
-      !this.client ||
-      !snapshot ||
-      this.state.connection !== "connected" ||
-      device?.status !== "online" ||
-      !characteristic ||
-      characteristic.status !== "ok" ||
-      !isCommandApplicable(characteristic, command)
+      !dispatchPrecondition({
+        live: this.live,
+        hasClient: Boolean(client),
+        hasSnapshot: Boolean(snapshot),
+        connected: this.state.connection === "connected",
+        deviceOnline: device?.status === "online",
+        characteristicAvailable: Boolean(characteristic && characteristic.status === "ok"),
+        commandApplicable: Boolean(characteristic && isCommandApplicable(characteristic, command)),
+        notBusy: !this.busy.has(key),
+      })
     ) {
       await showToast({
         style: Toast.Style.Failure,
@@ -132,12 +122,13 @@ export class Session {
       });
       return false;
     }
-    const client = this.client;
+    if (!snapshot || !device || !characteristic || !client) return false;
     const generation = this.generation;
     const instance = snapshot.node.instanceId;
     const owner = device.driver;
     const metadata = JSON.stringify([characteristic.spec, characteristic.access]);
     const signal = this.abort?.signal;
+    if (!signal) return false;
     this.busy.add(key);
     this.update({ pending: new Set(this.busy) });
     let toast: Toast | undefined;

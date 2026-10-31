@@ -1,0 +1,416 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "definitions": {
+    "InventoryAttachment": {
+      "description": "Physical attachment category shown in the device tree.",
+      "oneOf": [
+        {
+          "const": "host",
+          "description": "Connected directly to the host or to an unclassified host controller.",
+          "type": "string"
+        },
+        {
+          "const": "dock",
+          "description": "Connected through an inferred dock.",
+          "type": "string"
+        },
+        {
+          "const": "monitor",
+          "description": "Connected through a display's inferred USB companion hub.",
+          "type": "string"
+        }
+      ]
+    },
+    "InventoryDriver": {
+      "description": "Driver publishing a discovered node, when one can be linked safely.",
+      "properties": {
+        "class": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/InventoryDriverClass"
+            }
+          ],
+          "description": "Whether the driver is generic or specialized."
+        },
+        "deviceId": {
+          "description": "Published device identifier, if the inventory match resolved to one.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "description": "Installed driver identifier.",
+          "pattern": "^[a-z][a-z0-9-]{0,63}$",
+          "type": "string"
+        },
+        "version": {
+          "description": "Installed driver version.",
+          "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "version",
+        "class",
+        "deviceId"
+      ],
+      "type": "object"
+    },
+    "InventoryDriverClass": {
+      "description": "Driver category shown alongside a discovered node.",
+      "oneOf": [
+        {
+          "const": "specialized",
+          "description": "A driver claims specialized support for this hardware.",
+          "type": "string"
+        },
+        {
+          "const": "generic",
+          "description": "A generic driver publishes the device.",
+          "type": "string"
+        }
+      ]
+    },
+    "InventoryNode": {
+      "description": "One sanitized public node and its relationship to its parent.",
+      "properties": {
+        "attachment": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/InventoryAttachment"
+            }
+          ],
+          "description": "Inferred attachment group inherited from the tree."
+        },
+        "connected": {
+          "description": "Whether the device is currently connected or powered.",
+          "type": "boolean"
+        },
+        "detail": {
+          "description": "Optional safe supplemental text.",
+          "maxLength": 256,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "driver": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/InventoryDriver"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Driver linked to this node, if any."
+        },
+        "id": {
+          "description": "Per-install opaque identifier; never contains a native key.",
+          "pattern": "^n[0-9a-f]{16}$",
+          "type": "string"
+        },
+        "kind": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/InventoryNodeKind"
+            }
+          ],
+          "description": "Public node category."
+        },
+        "label": {
+          "description": "Human-readable, bounded and sanitized label.",
+          "maxLength": 128,
+          "minLength": 1,
+          "type": "string"
+        },
+        "parentId": {
+          "description": "Opaque identifier of the parent node, or `None` for the host root.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "productId": {
+          "description": "Four-digit lowercase USB product identifier, when available.",
+          "pattern": "^[0-9a-f]{4}$",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "relation": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/InventoryRelation"
+            }
+          ],
+          "description": "Evidence quality for this node's parent edge."
+        },
+        "rule": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/InventoryRule"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Rule explaining an inferred parent edge."
+        },
+        "speedMbps": {
+          "description": "USB link rate in megabits per second, when available.",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "vendorId": {
+          "description": "Four-digit lowercase USB vendor identifier, when available.",
+          "pattern": "^[0-9a-f]{4}$",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "parentId",
+        "kind",
+        "label",
+        "detail",
+        "vendorId",
+        "productId",
+        "speedMbps",
+        "connected",
+        "attachment",
+        "relation",
+        "rule",
+        "driver"
+      ],
+      "type": "object"
+    },
+    "InventoryNodeKind": {
+      "description": "Public kind of a node in the hardware tree.",
+      "oneOf": [
+        {
+          "const": "host",
+          "description": "The current computer.",
+          "type": "string"
+        },
+        {
+          "const": "controller",
+          "description": "A USB, display, Thunderbolt or Bluetooth controller.",
+          "type": "string"
+        },
+        {
+          "const": "dock",
+          "description": "A Thunderbolt/USB4 dock.",
+          "type": "string"
+        },
+        {
+          "const": "hub",
+          "description": "A USB hub.",
+          "type": "string"
+        },
+        {
+          "const": "usb_device",
+          "description": "A non-hub USB device.",
+          "type": "string"
+        },
+        {
+          "const": "display",
+          "description": "A display endpoint.",
+          "type": "string"
+        },
+        {
+          "const": "bluetooth_adapter",
+          "description": "A Bluetooth adapter.",
+          "type": "string"
+        },
+        {
+          "const": "bluetooth_device",
+          "description": "A paired Bluetooth device.",
+          "type": "string"
+        }
+      ]
+    },
+    "InventoryRelation": {
+      "description": "Whether a topology edge is directly observed or inferred by an explicit rule.",
+      "oneOf": [
+        {
+          "const": "exact",
+          "description": "The operating system directly reports this parent-child relationship.",
+          "type": "string"
+        },
+        {
+          "const": "inferred",
+          "description": "The relationship was derived from a documented matching rule.",
+          "type": "string"
+        }
+      ]
+    },
+    "InventoryRule": {
+      "description": "Named rule used for an inferred topology edge.",
+      "oneOf": [
+        {
+          "const": "usb4_tunnel",
+          "description": "USB root ports were matched to a USB4 tunnel on the same PCI device.",
+          "type": "string"
+        },
+        {
+          "const": "vendor_match",
+          "description": "A dock vendor name was matched to USB root-port manufacturer data.",
+          "type": "string"
+        },
+        {
+          "const": "driver_link",
+          "description": "A driver inventory declaration linked a USB companion to a display.",
+          "type": "string"
+        }
+      ]
+    },
+    "InventorySource": {
+      "description": "State and safe diagnostic for one independently collected source.",
+      "properties": {
+        "kind": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/InventorySourceKind"
+            }
+          ],
+          "description": "Source category."
+        },
+        "message": {
+          "description": "Optional bounded, non-sensitive diagnostic.",
+          "maxLength": 256,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "state": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/InventorySourceState"
+            }
+          ],
+          "description": "Collection outcome."
+        }
+      },
+      "required": [
+        "kind",
+        "state",
+        "message"
+      ],
+      "type": "object"
+    },
+    "InventorySourceKind": {
+      "description": "The independently collected hardware source represented by a source status.",
+      "oneOf": [
+        {
+          "const": "usb",
+          "description": "USB devices and host controllers.",
+          "type": "string"
+        },
+        {
+          "const": "thunderbolt",
+          "description": "Thunderbolt and USB4 topology.",
+          "type": "string"
+        },
+        {
+          "const": "ddc",
+          "description": "Display endpoints discovered by the DDC owner.",
+          "type": "string"
+        },
+        {
+          "const": "bluetooth",
+          "description": "Bluetooth adapters and paired devices.",
+          "type": "string"
+        }
+      ]
+    },
+    "InventorySourceState": {
+      "description": "Availability of one inventory source.",
+      "oneOf": [
+        {
+          "const": "ok",
+          "description": "The source was read successfully.",
+          "type": "string"
+        },
+        {
+          "const": "not_scanned",
+          "description": "The DDC owner has not performed its first scan.",
+          "type": "string"
+        },
+        {
+          "const": "unavailable",
+          "description": "The source is not available on this machine.",
+          "type": "string"
+        },
+        {
+          "const": "permission_denied",
+          "description": "Access was denied by the operating system.",
+          "type": "string"
+        },
+        {
+          "const": "error",
+          "description": "The source failed to read.",
+          "type": "string"
+        },
+        {
+          "const": "timeout",
+          "description": "The source did not complete before its deadline.",
+          "type": "string"
+        }
+      ]
+    }
+  },
+  "description": "Read-only inventory snapshot returned by the daemon API.",
+  "properties": {
+    "apiVersion": {
+      "description": "Version of the API contract.",
+      "maximum": 1,
+      "minimum": 1,
+      "type": "integer"
+    },
+    "generatedAt": {
+      "description": "UTC RFC3339 generation timestamp.",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]+)?(Z|\\+00:00)$",
+      "type": "string"
+    },
+    "instanceId": {
+      "description": "Stable identifier for this daemon process.",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+      "type": "string"
+    },
+    "nodes": {
+      "description": "Bounded host-rooted topology.",
+      "items": {
+        "$ref": "#/definitions/InventoryNode"
+      },
+      "maxItems": 1024,
+      "type": "array"
+    },
+    "sources": {
+      "description": "Independent status for each inventory source.",
+      "items": {
+        "$ref": "#/definitions/InventorySource"
+      },
+      "maxItems": 4,
+      "type": "array"
+    }
+  },
+  "required": [
+    "apiVersion",
+    "instanceId",
+    "generatedAt",
+    "sources",
+    "nodes"
+  ],
+  "title": "InventoryResponse",
+  "type": "object"
+}

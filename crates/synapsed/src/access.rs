@@ -76,9 +76,10 @@ impl AccessPolicy {
             ApiError::new(ErrorCode::ForbiddenOrigin, "Browser Origin is not allowed.")
         })?;
         // Origin is exact, including the authority used in this request, not every loopback port.
-        if value.strip_prefix("http://") != Some(host.as_str())
-            && !self.allowed_origins.iter().any(|allowed| allowed == value)
-        {
+        let same_bound_origin = value
+            .strip_prefix("http://")
+            .is_some_and(|authority| authority.eq_ignore_ascii_case(host.as_str()));
+        if !same_bound_origin && !self.allowed_origins.iter().any(|allowed| allowed == value) {
             return Err(ApiError::new(
                 ErrorCode::ForbiddenOrigin,
                 "Browser Origin is not allowed.",
@@ -106,7 +107,9 @@ pub fn validate_origin(origin: &str) -> Result<(), ApiError> {
         .host()
         .trim_start_matches('[')
         .trim_end_matches(']');
-    if !(host == "localhost" || host.parse::<IpAddr>().is_ok_and(|ip| ip.is_loopback())) {
+    if !(host.eq_ignore_ascii_case("localhost")
+        || host.parse::<IpAddr>().is_ok_and(|ip| ip.is_loopback()))
+    {
         return Err(invalid());
     }
     if authority.as_str().len() != authority.host().len() && authority.port_u16().is_none() {

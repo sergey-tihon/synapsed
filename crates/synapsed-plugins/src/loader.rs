@@ -101,7 +101,7 @@ fn read_capped(path: &Path, maximum: usize) -> Result<Vec<u8>, DriverError> {
         return Err(invalid());
     }
     let mut bytes = Vec::new();
-    file.take((maximum + 1) as u64)
+    file.take(u64::try_from(maximum).unwrap_or(u64::MAX).saturating_add(1))
         .read_to_end(&mut bytes)
         .map_err(|_| invalid())?;
     if bytes.len() > maximum {
@@ -164,43 +164,13 @@ pub(crate) fn load(
     config: &PluginConfig,
     registry: &CapabilityRegistry,
 ) -> Result<Catalog, DriverError> {
-    let listing = match fs::read_dir(&config.directory) {
-        Ok(listing) => listing,
-        Err(error)
-            if error.kind() == std::io::ErrorKind::NotFound && !config.directory_explicit =>
-        {
-            return Ok(Catalog {
-                packages: BTreeMap::new(),
-                statuses: BTreeMap::new(),
-            });
-        }
-        Err(_) => {
-            return Err(DriverError::new(
-                ErrorCode::PluginError,
-                "Configured plugin directory is not readable.",
-            ));
-        }
-    };
-    let canonical_directory = fs::canonicalize(&config.directory).map_err(|_| invalid())?;
     let mut catalog = Catalog {
         packages: BTreeMap::new(),
         statuses: BTreeMap::new(),
     };
-    let mut directories = Vec::new();
-    for item in listing {
-        let item = item.map_err(|_| invalid())?;
-        let kind = item.file_type().map_err(|_| invalid())?;
-        if kind.is_dir() || kind.is_symlink() {
-            directories.push(item);
-        }
-    }
-    if directories.len() > 16 {
-        return Err(DriverError::new(
-            ErrorCode::PluginError,
-            "Plugin catalog exceeds sixteen packages.",
-        ));
-    }
-    directories.sort_by_key(|item| item.file_name());
+    let Some((canonical_directory, directories)) = package_directories(config)? else {
+        return Ok(catalog);
+    };
     let reserved: BTreeSet<String> = directories
         .iter()
         .filter_map(|item| item.file_name().into_string().ok())
@@ -231,37 +201,14 @@ pub(crate) fn load(
             state: DriverState::Error,
             error: None,
         };
-        let result = (|| {
-            if item.file_type().map_err(|_| invalid())?.is_symlink() {
-                return Err(invalid());
-            }
-            let root = fs::canonicalize(item.path()).map_err(|_| invalid())?;
-            if root.parent() != Some(canonical_directory.as_path()) {
-                return Err(invalid());
-            }
-            let value: UniqueJson =
-                serde_json::from_slice(&read_capped(&root.join("plugin.json"), 64 * 1024)?)
-                    .map_err(|_| invalid())?;
-            let manifest: Manifest = serde_json::from_value(value.0).map_err(|_| invalid())?;
-            status.version = manifest.version.clone();
-            manifest.validate(&id)?;
-            if config.disabled.contains(&id) {
-                status.state = DriverState::Disabled;
-                return Ok(None);
-            }
-            registry.validate_manifest(&manifest)?;
-            let mut frozen = BTreeMap::new();
-            sources(&root, &root, &mut 0, &mut frozen)?;
-            if !frozen.contains_key(&manifest.entry) {
-                return Err(invalid());
-            }
-            status.state = DriverState::Disconnected;
-            Ok(Some(Package {
-                manifest,
-                sources: Arc::new(frozen),
-            }))
-        })();
-        match result {
+        match load_package(
+            &item,
+            &canonical_directory,
+            &id,
+            config,
+            registry,
+            &mut status,
+        ) {
             Ok(Some(package)) => {
                 catalog.packages.insert(id.clone(), package);
             }
@@ -278,6 +225,95 @@ pub(crate) fn load(
         }
         catalog.statuses.insert(id, status);
     }
+    disable_invalid_dependencies(&mut catalog);
+    disable_dependants(&mut catalog);
+    Ok(catalog)
+}
+fn package_directories(
+    config: &PluginConfig,
+) -> Result<Option<(std::path::PathBuf, Vec<fs::DirEntry>)>, DriverError> {
+    let listing = match fs::read_dir(&config.directory) {
+        Ok(listing) => listing,
+        Err(error)
+            if error.kind() == std::io::ErrorKind::NotFound && !config.directory_explicit =>
+        {
+            return Ok(None);
+        }
+        Err(_) => {
+            return Err(DriverError::new(
+                ErrorCode::PluginError,
+                "Configured plugin directory is not readable.",
+            ));
+        }
+    };
+    let canonical_directory = fs::canonicalize(&config.directory).map_err(|_| invalid())?;
+    let mut directories = Vec::new();
+    for item in listing {
+        let item = item.map_err(|_| invalid())?;
+        let kind = item.file_type().map_err(|_| invalid())?;
+        if kind.is_dir() || kind.is_symlink() {
+            directories.push(item);
+        }
+    }
+    if directories.len() > 16 {
+        return Err(DriverError::new(
+            ErrorCode::PluginError,
+            "Plugin catalog exceeds sixteen packages.",
+        ));
+    }
+    directories.sort_by_key(|item| item.file_name());
+    Ok(Some((canonical_directory, directories)))
+}
+fn load_package(
+    item: &fs::DirEntry,
+    canonical_directory: &Path,
+    id: &str,
+    config: &PluginConfig,
+    registry: &CapabilityRegistry,
+    status: &mut DriverStatus,
+) -> Result<Option<Package>, DriverError> {
+    if item.file_type().map_err(|_| invalid())?.is_symlink() {
+        return Err(invalid());
+    }
+    let root = fs::canonicalize(item.path()).map_err(|_| invalid())?;
+    if root.parent() != Some(canonical_directory) {
+        return Err(invalid());
+    }
+    let manifest = parse_manifest(&root, id, status)?;
+    if config
+        .disabled
+        .iter()
+        .any(|disabled| disabled.as_str() == id)
+    {
+        status.state = DriverState::Disabled;
+        return Ok(None);
+    }
+    registry.validate_manifest(&manifest)?;
+    let mut frozen = BTreeMap::new();
+    sources(&root, &root, &mut 0, &mut frozen)?;
+    if !frozen.contains_key(&manifest.entry) {
+        return Err(invalid());
+    }
+    status.state = DriverState::Disconnected;
+    Ok(Some(Package {
+        manifest,
+        sources: Arc::new(frozen),
+    }))
+}
+fn parse_manifest(
+    root: &Path,
+    id: &str,
+    status: &mut DriverStatus,
+) -> Result<Manifest, DriverError> {
+    let value: UniqueJson =
+        serde_json::from_slice(&read_capped(&root.join("plugin.json"), 64 * 1024)?)
+            .map_err(|_| invalid())?;
+    let manifest: Manifest = serde_json::from_value(value.0).map_err(|_| invalid())?;
+    status.version = manifest.version.clone();
+    manifest.validate(id)?;
+    Ok(manifest)
+}
+fn disable_invalid_dependencies(catalog: &mut Catalog) {
     let all = catalog.packages.clone();
     for (id, package) in &all {
         if cycle(id, &all, false, &mut BTreeSet::new())
@@ -302,8 +338,6 @@ pub(crate) fn load(
             status.error = Some(invalid());
         }
     }
-    disable_dependants(&mut catalog);
-    Ok(catalog)
 }
 pub(crate) fn disable_dependants(catalog: &mut Catalog) {
     loop {

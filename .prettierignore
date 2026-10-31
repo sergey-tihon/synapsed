@@ -8,4 +8,3 @@ packages/client/schema/
 packages/client/src/generated/
 package-lock.json
 Cargo.lock
-apps/streamdeck/com.sergey-tihon.synapsed.sdPlugin/ui/sdpi-components.js

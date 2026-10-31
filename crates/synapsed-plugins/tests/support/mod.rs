@@ -1,20 +1,85 @@
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::BTreeMap,
     path::{Path, PathBuf},
-    sync::{
-        Arc, Condvar, Mutex,
-        atomic::{AtomicBool, Ordering},
-    },
+    sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
 use synapsed_api::{CharacteristicValue, NodeInfo, Snapshot};
-use synapsed_core::{DriverError, ErrorCode, StateStore};
-use synapsed_ddc::{
-    DdcBackend, DdcClient, DdcTransport, InventoryWithOwnedHandles, OwnedEndpoint, VcpValue,
+use synapsed_core::StateStore;
+use synapsed_ddc::test_support::{
+    FakeBackend, FakeBarrier, FakeEndpoint, FakeState, FakeStateHandle,
 };
+use synapsed_ddc::{DdcClient, VcpValue};
 use synapsed_plugins::{
     CapabilityRegistry, PluginConfig, PluginHost, capabilities::ddc::DdcCapabilityFactory,
 };
+#[allow(dead_code)]
+pub struct BarrierRelease(FakeBarrier);
+impl Drop for BarrierRelease {
+    fn drop(&mut self) {
+        self.0.open();
+    }
+}
+#[allow(dead_code)]
+pub trait BarrierReleaseExt {
+    fn release_on_drop(&self) -> BarrierRelease;
+}
+impl BarrierReleaseExt for FakeBarrier {
+    fn release_on_drop(&self) -> BarrierRelease {
+        BarrierRelease(self.clone())
+    }
+}
+pub struct Hardware {
+    pub state: FakeStateHandle,
+    pub get_barrier: FakeBarrier,
+    pub set_barrier: FakeBarrier,
+}
+impl Hardware {
+    pub fn new(screens: Vec<Screen>) -> Arc<Self> {
+        let endpoints = screens
+            .into_iter()
+            .map(|screen| FakeEndpoint {
+                key: screen.key,
+                manufacturer: Some("BNQ".into()),
+                product: Some(1),
+                product_name: screen.name,
+                identity: screen.identity,
+                replies: screen.values,
+            })
+            .collect();
+        let state = FakeState {
+            endpoints,
+            ..FakeState::default()
+        };
+        let get_barrier = state.get_barrier.clone();
+        let set_barrier = state.set_barrier.clone();
+        Arc::new(Self {
+            state: Arc::new(Mutex::new(state)),
+            get_barrier,
+            set_barrier,
+        })
+    }
+    pub fn current(&self, code: u8) -> u16 {
+        self.state.lock().unwrap().endpoints[0].replies[&code].current
+    }
+    #[allow(dead_code)]
+    pub fn mutate(&self, code: u8, value: u16) {
+        self.state.lock().unwrap().endpoints[0]
+            .replies
+            .get_mut(&code)
+            .unwrap()
+            .current = value;
+    }
+}
+pub fn registry(hardware: Arc<Hardware>) -> CapabilityRegistry {
+    let state = hardware.state.clone();
+    let client = DdcClient::start_with_backend(move || Ok(FakeBackend::new(state))).unwrap();
+    let mut registry = CapabilityRegistry::default();
+    registry
+        .register(Arc::new(DdcCapabilityFactory::new(client)))
+        .unwrap();
+    registry
+}
 
 #[derive(Clone)]
 pub struct Screen {
@@ -53,150 +118,6 @@ impl Screen {
         }
     }
 }
-pub struct Barrier {
-    armed: AtomicBool,
-    pub entered: tokio::sync::Notify,
-    released: Mutex<bool>,
-    release: Condvar,
-}
-pub struct BarrierRelease<'a>(&'a Barrier);
-impl Drop for BarrierRelease<'_> {
-    fn drop(&mut self) {
-        self.0.open();
-    }
-}
-impl Barrier {
-    fn new() -> Self {
-        Self {
-            armed: AtomicBool::new(false),
-            entered: tokio::sync::Notify::new(),
-            released: Mutex::new(false),
-            release: Condvar::new(),
-        }
-    }
-    pub fn arm(&self) {
-        *self.released.lock().unwrap() = false;
-        self.armed.store(true, Ordering::SeqCst);
-    }
-    pub fn release_on_drop(&self) -> BarrierRelease<'_> {
-        BarrierRelease(self)
-    }
-    fn block(&self) {
-        if self.armed.swap(false, Ordering::SeqCst) {
-            self.entered.notify_one();
-            let mut released = self.released.lock().unwrap();
-            while !*released {
-                released = self.release.wait(released).unwrap();
-            }
-        }
-    }
-    pub fn open(&self) {
-        *self.released.lock().unwrap() = true;
-        self.release.notify_all();
-    }
-}
-#[derive(Default)]
-pub struct State {
-    pub screens: Vec<Screen>,
-    pub scan_errors: Vec<DriverError>,
-    pub reads: Vec<u8>,
-    pub writes: Vec<(u8, u16)>,
-    pub fail_reads: BTreeSet<u8>,
-    pub coercion: BTreeMap<u8, u16>,
-    pub fail_set_number: Option<usize>,
-}
-pub struct Hardware {
-    pub state: Mutex<State>,
-    pub get_barrier: Barrier,
-    pub set_barrier: Barrier,
-}
-impl Hardware {
-    pub fn new(screens: Vec<Screen>) -> Arc<Self> {
-        Arc::new(Self {
-            state: Mutex::new(State {
-                screens,
-                ..State::default()
-            }),
-            get_barrier: Barrier::new(),
-            set_barrier: Barrier::new(),
-        })
-    }
-    pub fn current(&self, code: u8) -> u16 {
-        self.state.lock().unwrap().screens[0].values[&code].current
-    }
-    pub fn mutate(&self, code: u8, value: u16) {
-        self.state.lock().unwrap().screens[0]
-            .values
-            .get_mut(&code)
-            .unwrap()
-            .current = value;
-    }
-}
-struct Backend(Arc<Hardware>);
-struct Transport {
-    hardware: Arc<Hardware>,
-    key: String,
-}
-impl DdcBackend for Backend {
-    fn scan(&mut self) -> Result<InventoryWithOwnedHandles, DriverError> {
-        let state = self.0.state.lock().unwrap();
-        Ok(InventoryWithOwnedHandles {
-            endpoints: state
-                .screens
-                .iter()
-                .map(|screen| OwnedEndpoint {
-                    key: screen.key.clone(),
-                    manufacturer: Some("BNQ".into()),
-                    product: Some(1),
-                    product_name: screen.name.clone(),
-                    identity: screen.identity.clone(),
-                    transport: Box::new(Transport {
-                        hardware: self.0.clone(),
-                        key: screen.key.clone(),
-                    }),
-                })
-                .collect(),
-            errors: state.scan_errors.clone(),
-        })
-    }
-}
-impl DdcTransport for Transport {
-    fn get_vcp(&mut self, code: u8) -> Result<VcpValue, DriverError> {
-        self.hardware.get_barrier.block();
-        let mut state = self.hardware.state.lock().unwrap();
-        state.reads.push(code);
-        if state.fail_reads.contains(&code) {
-            return Err(DriverError::new(
-                ErrorCode::DdcError,
-                "Fixture register read failed.",
-            ));
-        }
-        state
-            .screens
-            .iter()
-            .find(|screen| screen.key == self.key)
-            .and_then(|screen| screen.values.get(&code))
-            .copied()
-            .ok_or_else(|| DriverError::new(ErrorCode::DdcError, "Fixture register absent."))
-    }
-    fn set_vcp(&mut self, code: u8, value: u16) -> Result<(), DriverError> {
-        self.hardware.set_barrier.block();
-        let mut state = self.hardware.state.lock().unwrap();
-        state.writes.push((code, value));
-        if state.fail_set_number == Some(state.writes.len()) {
-            return Err(DriverError::new(ErrorCode::DdcError, "Fixture Set failed."));
-        }
-        let observed = state.coercion.get(&code).copied().unwrap_or(value);
-        state
-            .screens
-            .iter_mut()
-            .find(|screen| screen.key == self.key)
-            .and_then(|screen| screen.values.get_mut(&code))
-            .ok_or_else(|| DriverError::new(ErrorCode::DdcError, "Fixture register absent."))?
-            .current = observed;
-        Ok(())
-    }
-}
 pub fn root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
@@ -225,14 +146,6 @@ pub fn catalog(packages: &[&str]) -> tempfile::TempDir {
         copy_tree(&source, &temp.path().join(id));
     }
     temp
-}
-pub fn registry(hardware: Arc<Hardware>) -> CapabilityRegistry {
-    let client = DdcClient::start_with_backend(move || Ok(Backend(hardware))).unwrap();
-    let mut registry = CapabilityRegistry::default();
-    registry
-        .register(Arc::new(DdcCapabilityFactory::new(client)))
-        .unwrap();
-    registry
 }
 pub struct Harness {
     pub host: PluginHost,
@@ -315,6 +228,7 @@ pub fn value<'a>(snapshot: &'a Snapshot, id: &str) -> &'a CharacteristicValue {
         .unwrap()
 }
 
+#[allow(dead_code)]
 pub fn transform_discovery(entry: &Path, transform: &str) {
     let source = std::fs::read_to_string(entry).unwrap();
     let wrapped = format!(

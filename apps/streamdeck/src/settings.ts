@@ -1,5 +1,7 @@
 import { isCharacteristicCommand, type CharacteristicCommand } from "@synapsed/client";
 
+export const ID_PATTERN = /^[a-z][a-z0-9_.-]{0,63}$/;
+
 export type Binding = { deviceId: string; characteristicId: string };
 export type ActionSettings = {
   binding?: Binding;
@@ -14,9 +16,9 @@ export function isBinding(value: unknown): value is Binding {
   return (
     Object.keys(binding).length === 2 &&
     typeof binding.deviceId === "string" &&
-    /^[a-z][a-z0-9_.-]{0,63}$/.test(binding.deviceId) &&
+    ID_PATTERN.test(binding.deviceId) &&
     typeof binding.characteristicId === "string" &&
-    /^[a-z][a-z0-9_.-]{0,63}$/.test(binding.characteristicId)
+    ID_PATTERN.test(binding.characteristicId)
   );
 }
 

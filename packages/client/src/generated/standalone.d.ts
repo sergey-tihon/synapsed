@@ -11,3 +11,4 @@ export declare const checkCharacteristic: StandaloneValidator;
 export declare const checkCharacteristicCommand: StandaloneValidator;
 export declare const checkServerEvent: StandaloneValidator;
 export declare const checkErrorResponse: StandaloneValidator;
+export declare const checkInventoryResponse: StandaloneValidator;

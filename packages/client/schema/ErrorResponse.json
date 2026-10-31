@@ -2,11 +2,18 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "definitions": {
     "ApiError": {
+      "description": "An API error with a bounded, user-safe message.",
       "properties": {
         "code": {
-          "$ref": "#/definitions/ErrorCode"
+          "allOf": [
+            {
+              "$ref": "#/definitions/ErrorCode"
+            }
+          ],
+          "description": "Category identifying the kind of failure."
         },
         "message": {
+          "description": "Bounded human-readable description of the failure.",
           "maxLength": 256,
           "type": "string"
         }
@@ -18,30 +25,100 @@
       "type": "object"
     },
     "ErrorCode": {
-      "enum": [
-        "invalid_request",
-        "forbidden_origin",
-        "forbidden_host",
-        "unknown_device",
-        "unknown_characteristic",
-        "ambiguous_device",
-        "driver_conflict",
-        "unsupported_operation",
-        "invalid_value",
-        "permission_denied",
-        "device_unavailable",
-        "ddc_error",
-        "plugin_error",
-        "unsupported_capability",
-        "busy",
-        "timeout"
-      ],
-      "type": "string"
+      "description": "Machine-readable category describing an API error.",
+      "oneOf": [
+        {
+          "const": "invalid_request",
+          "description": "The request could not be parsed or otherwise violates the API contract.",
+          "type": "string"
+        },
+        {
+          "const": "forbidden_origin",
+          "description": "The request origin is not allowed.",
+          "type": "string"
+        },
+        {
+          "const": "forbidden_host",
+          "description": "The request host is not allowed.",
+          "type": "string"
+        },
+        {
+          "const": "unknown_device",
+          "description": "The requested device does not exist.",
+          "type": "string"
+        },
+        {
+          "const": "unknown_characteristic",
+          "description": "The requested characteristic does not exist.",
+          "type": "string"
+        },
+        {
+          "const": "ambiguous_device",
+          "description": "The request identifies more than one device.",
+          "type": "string"
+        },
+        {
+          "const": "driver_conflict",
+          "description": "The requested driver operation conflicts with current ownership.",
+          "type": "string"
+        },
+        {
+          "const": "unsupported_operation",
+          "description": "The requested operation is not supported.",
+          "type": "string"
+        },
+        {
+          "const": "invalid_value",
+          "description": "A supplied value is invalid.",
+          "type": "string"
+        },
+        {
+          "const": "permission_denied",
+          "description": "The operation is not permitted.",
+          "type": "string"
+        },
+        {
+          "const": "device_unavailable",
+          "description": "The requested device is unavailable.",
+          "type": "string"
+        },
+        {
+          "const": "ddc_error",
+          "description": "A DDC transport operation failed.",
+          "type": "string"
+        },
+        {
+          "const": "plugin_error",
+          "description": "A driver plugin operation failed.",
+          "type": "string"
+        },
+        {
+          "const": "unsupported_capability",
+          "description": "The requested capability is not supported.",
+          "type": "string"
+        },
+        {
+          "const": "busy",
+          "description": "The operation could not proceed because the service is busy.",
+          "type": "string"
+        },
+        {
+          "const": "timeout",
+          "description": "The operation exceeded its deadline.",
+          "type": "string"
+        }
+      ]
     }
   },
+  "description": "Standard response body containing an API error.",
   "properties": {
     "error": {
-      "$ref": "#/definitions/ApiError"
+      "allOf": [
+        {
+          "$ref": "#/definitions/ApiError"
+        }
+      ],
+      "description": "The error details returned to the caller."
     }
   },
   "required": [

@@ -2,7 +2,7 @@
 
 ## Project
 
-Synapsed is a Rust user daemon for macOS Apple Silicon and Linux x86_64/aarch64, deployed Lua device drivers, one local characteristic API and shared clients. The architectural contract is in `docs/specs/0000-repository.md` and `docs/adr/`; design documents are not proof of native surfaces or physical hardware behavior. Generic brightness and verified BenQ RD280U behavior belong only to installed Lua; no embedded driver or Rust brightness fallback. Network publication/discovery, Home Assistant and other reserved integrations are outside this local milestone.
+Synapsed is a Rust user daemon for macOS Apple Silicon and Linux x86_64, deployed Lua device drivers, one local characteristic API and shared clients. The architectural contract is in `docs/specs/0000-repository.md` and `docs/adr/`; design documents are not proof of native surfaces or physical hardware behavior. Generic brightness and verified BenQ RD280U behavior belong only to installed Lua; no embedded driver or Rust brightness fallback. Network publication/discovery, Home Assistant and other reserved integrations are outside this local milestone.
 
 ## Build and verification
 
