@@ -123,12 +123,13 @@ export function groupByAttachment(nodes: readonly InventoryNode[]): AttachmentGr
     docks: dockRoots.map((root) => ({
       id: root.id,
       label: root.label,
-      tree: buildTree(root, children, (child) => child.attachment === "dock"),
+      // A daisy-chained dock is its own group; stop at it so its subtree is not repeated here.
+      tree: buildTree(root, children, (child) => child.attachment === "dock" && child.kind !== "dock"),
     })),
     monitors: monitorRoots.map((root) => ({
       id: root.id,
       label: root.label,
-      tree: buildTree(root, children, (child) => child.attachment === "monitor"),
+      tree: buildTree(root, children, (child) => child.attachment === "monitor" && child.kind !== "display"),
     })),
   };
 }

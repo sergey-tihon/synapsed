@@ -10,7 +10,7 @@ import {
   type SynapsedClient,
 } from "@synapsed/client";
 
-import { bindingKey, dispatchPrecondition } from "./model";
+import { bindingKey, dispatchPrecondition, displayValue } from "./model";
 export interface ViewState {
   snapshot?: Snapshot;
   status?: StatusResponse;
@@ -43,6 +43,11 @@ export class Session {
   start(endpoint: string) {
     this.live = true;
     const generation = ++this.generation;
+    // A restart (e.g. endpoint change) must not inherit pending commands or data
+    // from the previous connection; their completions are dropped by generation.
+    this.busy.clear();
+    this.state = { connection: "connecting", pending: new Set() };
+    this.listeners.forEach((listener) => listener());
     this.abort = new AbortController();
     try {
       this.client = createClient({ baseUrl: endpoint });

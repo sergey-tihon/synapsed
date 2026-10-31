@@ -98,6 +98,19 @@ describe("hardware inventory helpers", () => {
     expect(flatten(groups.monitors[0]!.tree)).toEqual(["display", "monitor-hub", "monitor-usb"]);
   });
 
+  it("keeps daisy-chained docks in their own groups without duplicating descendants", () => {
+    const groups = groupByAttachment([
+      node("host", "host", null, "host"),
+      node("dock-a", "dock", "host", "dock", { label: "Dock A" }),
+      node("dock-a-hub", "hub", "dock-a", "dock"),
+      node("dock-b", "dock", "dock-a-hub", "dock", { label: "Dock B" }),
+      node("dock-b-usb", "usb_device", "dock-b", "dock"),
+    ]);
+    expect(groups.docks.map((group) => group.label)).toEqual(["Dock A", "Dock B"]);
+    expect(flatten(groups.docks[0]!.tree)).toEqual(["dock-a", "dock-a-hub"]);
+    expect(flatten(groups.docks[1]!.tree)).toEqual(["dock-b", "dock-b-usb"]);
+  });
+
   it("describes specialized, generic and missing driver states in text", () => {
     expect(driverBadge(specializedDriver)).toEqual({
       label: "Specialized driver · headset-driver",

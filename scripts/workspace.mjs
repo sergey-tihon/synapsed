@@ -230,6 +230,7 @@ try {
       await build();
       await run("npm", ["run", "api:check"]);
       await run("npm", ["run", "brand:check"]);
+      await run("npm", ["run", "notices:check"]);
       await cargo(["test", "--workspace", "--all-features", ...(!macos ? ["--exclude", "synapsed-macos-tray"] : [])]);
       await npm("@synapsed/client", "test");
       await npm("@synapsed/web", "test");

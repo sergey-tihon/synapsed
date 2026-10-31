@@ -3,7 +3,7 @@
 use crate::model::{RawRecord, SourceCollection};
 use objc2::runtime::AnyObject;
 use objc2_core_bluetooth::{CBManager, CBManagerAuthorization};
-use objc2_io_bluetooth::{IOBluetoothDevice, IOBluetoothHostController};
+use objc2_io_bluetooth::{BluetoothHCIPowerState, IOBluetoothDevice, IOBluetoothHostController};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use synapsed_api::{InventorySource, InventorySourceKind, InventorySourceState};
@@ -42,7 +42,7 @@ pub fn collect() -> SourceCollection {
         .map(|name| name.to_string());
     let powered = controller
         .as_ref()
-        .is_some_and(|controller| unsafe { controller.powerState() != 0 });
+        .is_some_and(|controller| unsafe { controller.powerState() } == BluetoothHCIPowerState::ON);
     let mut records = vec![RawRecord::BluetoothAdapter {
         key: ADAPTER_KEY.to_owned(),
         controller_key: None,
@@ -54,7 +54,7 @@ pub fn collect() -> SourceCollection {
     let mut paired_devices = Vec::new();
     if let Some(devices) = unsafe { IOBluetoothDevice::pairedDevices() } {
         for index in 0..devices.count() {
-            let object: objc2::rc::Retained<AnyObject> = unsafe { devices.objectAtIndex(index) };
+            let object: objc2::rc::Retained<AnyObject> = devices.objectAtIndex(index);
             let Ok(device) = object.downcast::<IOBluetoothDevice>() else {
                 continue;
             };

@@ -25,6 +25,8 @@
   "scripts": {
     "brand": "node scripts/brand.mjs generate",
     "brand:check": "node scripts/brand.mjs check",
+    "notices": "node scripts/notices.mjs generate",
+    "notices:check": "node scripts/notices.mjs check",
     "build": "node scripts/workspace.mjs build",
     "api:generate": "node scripts/api.mjs generate",
     "api:check": "node scripts/api.mjs check",

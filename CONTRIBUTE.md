@@ -29,6 +29,8 @@ npm run pack
 Install Rustfmt with `rustup component add rustfmt`; `npm ci` installs the pinned Prettier and StyLua development dependencies. Formatting excludes generated/vendor/build output. `npm run audit` runs `npm audit --workspaces --include-workspace-root --omit=dev`; it is not a Rust security audit.
 
 Address audit advisories with targeted compatible dependency updates or explicit root overrides, updating the canonical lockfile and checking affected builds/native tooling. Keep intentional SDK and Solid RC pins unless a coordinated change is required. Do not run `npm audit fix --force` or silence findings instead of resolving them.
+
+`THIRD-PARTY-NOTICES.txt` is generated from both root lockfiles across all locked platforms and features. After any dependency change run `npm run notices` (it may download crates and npm tarballs for other platforms); `npm test` runs the offline `npm run notices:check` drift check.
 The root pins and overrides `@solidjs/babel-plugin` and `@solidjs/compiler` to match the Solid web runtime RC; changing these together avoids dev compiler output importing helpers absent from the pinned runtime.
 
 `npm test` builds the daemon/CLI/embedded web and, on macOS, native clients; checks generated-schema drift; runs locked platform-selected Cargo suites, TS transport/parser tests and the pure Omarchy model tests. `npm run api:generate` deliberately updates checked-in schemas/types/standalone validators. `npm run api:check` compares regenerated output without rewriting included files. Tests do not require physical monitor writes.
