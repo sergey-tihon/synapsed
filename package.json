@@ -15,8 +15,8 @@
   ],
   "overrides": {
     "zod": "^4.6.7",
-    "@solidjs/babel-plugin": "2.0.0-rc.15",
-    "@solidjs/compiler": "2.0.0-rc.15",
+    "@solidjs/babel-plugin": "2.0.0-rc.19",
+    "@solidjs/compiler": "2.0.0-rc.19",
     "seroval": "1.6.11",
     "@raycast/api": {
       "minimatch": "11.0.1"
@@ -63,8 +63,8 @@
   "devDependencies": {
     "@johnnymorganz/stylua-bin": "2.5.2",
     "@resvg/resvg-js": "2.6.2",
-    "@solidjs/babel-plugin": "2.0.0-rc.15",
-    "@solidjs/compiler": "2.0.0-rc.15",
+    "@solidjs/babel-plugin": "2.0.0-rc.19",
+    "@solidjs/compiler": "2.0.0-rc.19",
     "prettier": "3.8.3"
   }
 }
