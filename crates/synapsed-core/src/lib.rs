@@ -10,6 +10,8 @@ pub use operation::{
     DeviceGrant, EndpointGates, EndpointToken, NativeWork, OperationContext, OperationState,
     TransportOutcome,
 };
+/// Snapshot and cached JSON encoding captured by one publication.
+pub use state::PublishedSnapshot;
 /// Thread-safe, validated publication of daemon state.
 pub use state::StateStore;
 /// API error type exposed by the core crate.

@@ -116,7 +116,7 @@ impl TestServer {
         let mut changed = self.store.subscribe();
         tokio::time::timeout(Duration::from_secs(8), async {
             loop {
-                let snapshot = changed.borrow_and_update().clone();
+                let snapshot = changed.borrow_and_update().snapshot().clone();
                 if predicate(&snapshot) {
                     let snapshot = snapshot.as_ref().clone();
                     snapshot.validate().unwrap();

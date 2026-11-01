@@ -200,7 +200,7 @@ impl Harness {
         let mut changed = self.store.subscribe();
         tokio::time::timeout(Duration::from_secs(12), async {
             loop {
-                let snapshot = changed.borrow_and_update().clone();
+                let snapshot = changed.borrow_and_update().snapshot().clone();
                 if condition(&snapshot) {
                     return snapshot;
                 }

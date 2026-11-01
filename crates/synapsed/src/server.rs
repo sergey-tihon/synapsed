@@ -31,7 +31,7 @@ use synapsed_api::{
     ApiError, CharacteristicChange, CharacteristicCommand, DeviceResponse, DeviceStatus, ErrorCode,
     LogLevel, LogsResponse, ServerEvent, Snapshot,
 };
-use synapsed_core::StateStore;
+use synapsed_core::{PublishedSnapshot, StateStore};
 use synapsed_plugins::PluginHost;
 use tokio::{
     net::TcpListener,
@@ -150,15 +150,15 @@ impl Application {
             )),
         }
     }
-    fn snapshot_frame(&self) -> Utf8Bytes {
-        let encoded = self.inner.store.encoded_snapshot();
+    fn snapshot_frame(&self, publication: &PublishedSnapshot) -> Utf8Bytes {
+        let encoded = publication.encoded();
         let mut cached = self
             .inner
             .frame
             .lock()
             .expect("snapshot frame mutex poisoned");
         if let Some(frame) = &*cached
-            && Arc::ptr_eq(&frame.encoded, &encoded)
+            && Arc::ptr_eq(&frame.encoded, encoded)
         {
             return frame.text.clone();
         }
@@ -167,11 +167,11 @@ impl Application {
         const PREFIX: &[u8] = b"{\"type\":\"snapshot\",\"snapshot\":";
         let mut bytes = Vec::with_capacity(encoded.len() + PREFIX.len() + 1);
         bytes.extend_from_slice(PREFIX);
-        bytes.extend_from_slice(&encoded);
+        bytes.extend_from_slice(encoded);
         bytes.push(b'}');
         let text = Utf8Bytes::from(String::from_utf8(bytes).expect("snapshot is UTF-8 JSON"));
         *cached = Some(SnapshotFrame {
-            encoded,
+            encoded: encoded.clone(),
             text: text.clone(),
         });
         text
@@ -279,7 +279,7 @@ async fn observe_driver_status(application: Application) {
     let mut stopping = application.inner.stopping.subscribe();
     let mut previous = Vec::new();
     loop {
-        let current = snapshots.borrow_and_update().drivers.clone();
+        let current = snapshots.borrow_and_update().snapshot().drivers.clone();
         for driver in &current {
             if !previous.iter().any(|old| old == driver) {
                 let (level, message) = match driver.state {
@@ -583,8 +583,14 @@ async fn stream_events(socket: WebSocket, application: Application) {
         .await;
         return;
     }
-    let mut previous = changes.borrow_and_update().clone();
-    if !send(&mut outgoing, Message::Text(application.snapshot_frame())).await {
+    let initial = changes.borrow_and_update().clone();
+    let mut previous = initial.snapshot().clone();
+    if !send(
+        &mut outgoing,
+        Message::Text(application.snapshot_frame(&initial)),
+    )
+    .await
+    {
         return;
     }
     if !send(
@@ -631,8 +637,8 @@ async fn stream_events(socket: WebSocket, application: Application) {
             changed = changes.changed() => {
                 if changed.is_err() { break; }
                 let current = changes.borrow_and_update().clone();
-                if !send(&mut outgoing, Message::Text(application.snapshot_frame())).await { break; }
-                for change in characteristic_changes(&previous, &current) {
+                if !send(&mut outgoing, Message::Text(application.snapshot_frame(&current))).await { break; }
+                for change in characteristic_changes(&previous, current.snapshot()) {
                     if !send(
                         &mut outgoing,
                         event_frame(ServerEvent::CharacteristicChanged { change }),
@@ -640,7 +646,7 @@ async fn stream_events(socket: WebSocket, application: Application) {
                         break 'stream;
                     }
                 }
-                previous = current;
+                previous = current.snapshot().clone();
             },
             event = live_logs.recv() => match event {
                 Ok((sequence, entry)) => {

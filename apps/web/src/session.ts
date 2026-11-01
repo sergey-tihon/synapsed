@@ -160,7 +160,7 @@ export function createSynapsedSession(): SynapsedSession {
     }
     const nextResults = expireResultsOnRevision(reset.results, next.revision);
     reducerState = { ...reset, results: nextResults };
-    setLogs(reducerState.logs);
+    setResults(nextResults);
     setChanges(reducerState.changes);
     setState((draft) => {
       if (draft.snapshot === null) {

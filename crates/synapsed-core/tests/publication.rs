@@ -50,6 +50,32 @@ fn report(value: f64) -> (DriverStatus, Vec<Device>) {
         }],
     )
 }
+
+#[test]
+fn watched_snapshot_keeps_its_encoding_when_a_later_snapshot_is_published() {
+    let store = store();
+    let mut changes = store.subscribe();
+
+    let first_snapshot = store.publish_driver_states(vec![report(0.125)]).unwrap();
+    let first = changes.borrow_and_update().clone();
+    assert_eq!(first.snapshot().as_ref(), first_snapshot.as_ref());
+    let first_json = std::str::from_utf8(first.encoded()).unwrap();
+    assert!(first_json.contains("\"revision\":\"1\""));
+    assert!(first_json.contains("0.125"));
+
+    let second_snapshot = store.publish_driver_states(vec![report(0.75)]).unwrap();
+    let second = changes.borrow_and_update().clone();
+    assert_eq!(second.snapshot().as_ref(), second_snapshot.as_ref());
+    assert!(
+        std::str::from_utf8(second.encoded())
+            .unwrap()
+            .contains("\"revision\":\"2\"")
+    );
+    let second_json = std::str::from_utf8(second.encoded()).unwrap();
+    assert!(second_json.contains("0.75"));
+    assert_eq!(first.snapshot().revision, "1");
+    assert!(first_json.contains("0.125"));
+}
 #[test]
 fn rejected_report_cannot_publish_partial_state_or_increment_revision() {
     let store = store();

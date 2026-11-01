@@ -17,7 +17,7 @@ pub struct StateStore {
 }
 struct Inner {
     state: Mutex<State>,
-    changed: watch::Sender<Arc<Snapshot>>,
+    changed: watch::Sender<Arc<PublishedSnapshot>>,
     started: Instant,
 }
 struct State {
@@ -25,6 +25,23 @@ struct State {
     snapshot: Arc<Snapshot>,
     encoded: Arc<[u8]>,
     revision: u64,
+}
+
+/// A validated snapshot and its cached encoding from the same atomic publication.
+#[derive(Debug, Clone)]
+pub struct PublishedSnapshot {
+    snapshot: Arc<Snapshot>,
+    encoded: Arc<[u8]>,
+}
+impl PublishedSnapshot {
+    /// Return the immutable public snapshot from this publication.
+    pub fn snapshot(&self) -> &Arc<Snapshot> {
+        &self.snapshot
+    }
+    /// Return the compact JSON representation of this publication.
+    pub fn encoded(&self) -> &Arc<[u8]> {
+        &self.encoded
+    }
 }
 impl StateStore {
     /// Fixed fault text keeps retained observations publishable at the wire-size limit.
@@ -69,9 +86,13 @@ impl StateStore {
             drivers: vec![],
             devices: vec![],
         };
-        let encoded = Arc::from(Self::validate_snapshot(&snapshot)?);
+        let encoded: Arc<[u8]> = Arc::from(Self::validate_snapshot(&snapshot)?);
         let snapshot = Arc::new(snapshot);
-        let (changed, _) = watch::channel(snapshot.clone());
+        let publication = Arc::new(PublishedSnapshot {
+            snapshot: snapshot.clone(),
+            encoded: encoded.clone(),
+        });
+        let (changed, _) = watch::channel(publication);
         Ok(Self {
             inner: Arc::new(Inner {
                 state: Mutex::new(State {
@@ -103,8 +124,8 @@ impl StateStore {
             .encoded
             .clone()
     }
-    /// Subscribe to published snapshots; receivers observe the latest replacement.
-    pub fn subscribe(&self) -> watch::Receiver<Arc<Snapshot>> {
+    /// Subscribe to atomic snapshot publications and their cached encodings.
+    pub fn subscribe(&self) -> watch::Receiver<Arc<PublishedSnapshot>> {
         self.inner.changed.subscribe()
     }
     /// Return a status response with the current revision, drivers, and uptime.
@@ -195,11 +216,15 @@ impl StateStore {
         };
         let encoded: Arc<[u8]> = Arc::from(Self::validate_snapshot(&snapshot)?);
         let snapshot = Arc::new(snapshot);
+        let publication = Arc::new(PublishedSnapshot {
+            snapshot: snapshot.clone(),
+            encoded: encoded.clone(),
+        });
         state.reports.extend(replacements);
         state.revision = revision;
         state.encoded = encoded;
         state.snapshot = snapshot.clone();
-        self.inner.changed.send_replace(snapshot.clone());
+        self.inner.changed.send_replace(publication);
         Ok(snapshot)
     }
 }
