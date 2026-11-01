@@ -35,13 +35,19 @@ fn hashed_asset_path(html: &str, extension: &str) -> String {
         .find(|part| part.starts_with("/assets/") && part.ends_with(extension))
         .expect("built HTML should reference an asset with the requested extension");
     let filename = path.rsplit('/').next().unwrap();
-    let hash = filename
-        .strip_suffix(extension)
-        .unwrap()
-        .rsplit_once('-')
-        .map(|(_, hash)| hash)
-        .expect("asset filename should include a content hash");
-    assert!(hash.len() >= 8 && hash.bytes().all(|byte| byte.is_ascii_alphanumeric()));
+    let stem = filename.strip_suffix(extension).unwrap();
+    let bytes = stem.as_bytes();
+    assert!(
+        bytes.len() >= 9,
+        "asset filename should include a content hash"
+    );
+    let hash_start = bytes.len() - 8;
+    assert_eq!(bytes[hash_start - 1], b'-');
+    assert!(
+        bytes[hash_start..]
+            .iter()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    );
     path.to_owned()
 }
 
