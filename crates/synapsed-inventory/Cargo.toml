@@ -19,7 +19,7 @@ sha2.workspace = true
 zbus = { version = "=5.19.0", features = ["blocking"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
-objc2 = { version = "=0.6.3", default-features = false, features = ["std"] }
+objc2 = { version = "=0.6.5", default-features = false, features = ["std"] }
 objc2-core-foundation = { version = "=0.3.2", default-features = false, features = ["CFDictionary", "CFNumber", "CFString"] }
 objc2-io-kit = { version = "=0.3.2", default-features = false, features = ["libc", "std", "usb"] }
 objc2-io-bluetooth = { version = "=0.3.2", default-features = false, features = ["Bluetooth", "IOBluetoothDevice", "IOBluetoothObject", "IOBluetoothHostController", "objc2", "objc2-foundation", "std"] }
