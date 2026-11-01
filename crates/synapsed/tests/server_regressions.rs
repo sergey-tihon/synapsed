@@ -198,9 +198,11 @@ async fn unavailable_device_rejects_commands_as_service_unavailable() {
         label: "Offline monitor".into(),
         status: synapsed_api::DeviceStatus::Unavailable,
         error: None,
+        groups: vec![],
         characteristics: vec![synapsed_api::Characteristic {
             id: "brightness".into(),
             label: "Brightness".into(),
+            group: None,
             spec: synapsed_api::CharacteristicSpec::Number {
                 minimum: Some(0.0),
                 maximum: Some(100.0),

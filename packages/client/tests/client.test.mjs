@@ -130,6 +130,27 @@ test("one demanded socket waits for an actual initial snapshot and serves late s
   assert.equal(server.connectionCount, 1, "last unsubscribe prevents reconnect");
 });
 
+test("characteristic change events dispatch without modifying log state", async (t) => {
+  const server = await serverFixture(t);
+  const state = observer(server.client());
+  await state.until((value) => value.rings.length === 1);
+  const change = {
+    revision: "1",
+    timestamp: "2026-11-01T09:08:29.123Z",
+    deviceId: "instrument",
+    characteristicId: "measurement",
+    value: 5,
+    status: "ok",
+    error: null,
+  };
+  server.broadcast({ type: "characteristic_changed", change });
+  await state.until((value) => value.changes.length === 1);
+  assert.deepEqual(state.state.changes, [change]);
+  assert.deepEqual(state.state.rings, [[]]);
+  assert.deepEqual(state.state.liveLogs, []);
+  assert.deepEqual(state.state.visibleLogs, []);
+});
+
 test("decimal snapshot ordering discards 9 after 10, equal revisions and precision-loss updates", async (t) => {
   const server = await serverFixture(t);
   server.current = snapshot("9");

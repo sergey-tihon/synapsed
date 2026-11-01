@@ -40,6 +40,13 @@ fn fake_hardware() -> Hardware {
                 },
             ),
             (
+                0x12,
+                VcpValue {
+                    current: 50,
+                    maximum: 100,
+                },
+            ),
+            (
                 0x19,
                 VcpValue {
                     current: 2,
@@ -58,6 +65,13 @@ fn fake_hardware() -> Hardware {
                 VcpValue {
                     current: 0x0305,
                     maximum: 0x070a,
+                },
+            ),
+            (
+                0xe1,
+                VcpValue {
+                    current: 80,
+                    maximum: 0xffff,
                 },
             ),
         ]),

@@ -5,9 +5,17 @@ local SWITCH = 0xD7
 local LEVEL = 0xD9
 local SWITCH_MAXIMUM = 0x0231
 local LEVEL_MAXIMUM = 0x070A
+local CONTRAST = 0x12
+local AMBIENT = 0xE1
+local AMBIENT_MAXIMUM = 0xFFFF
 
 local function failure(code, message)
   return { code = code, message = message }
+end
+
+local function in_group(group, definition)
+  definition.group = group
+  return definition
 end
 
 local function register_valid(value, maximum)
@@ -84,18 +92,22 @@ end
 
 local function refresh(ctx, endpoint)
   local brightness, brightness_error = monitor.read_brightness(ctx, endpoint)
+  local contrast, contrast_error = monitor.read_level(ctx, endpoint, CONTRAST, "Contrast")
   local blue, blue_error = read_register(ctx, endpoint, BLUE, 5)
   -- Each packed register is sampled once; its fields share the same observation.
   local switch, switch_error = read_register(ctx, endpoint, SWITCH, SWITCH_MAXIMUM)
   local level, level_error = read_register(ctx, endpoint, LEVEL, LEVEL_MAXIMUM)
+  local ambient, ambient_error = read_register(ctx, endpoint, AMBIENT, AMBIENT_MAXIMUM)
   return {
     updates = {
       update("brightness", brightness and brightness.current or nil, brightness_error),
+      update("contrast", contrast and contrast.current or nil, contrast_error),
       field_update("low_blue_light", blue, blue_error),
       field_update("moonhalo.power", switch, switch_error),
       field_update("moonhalo.brightness", level, level_error),
       field_update("moonhalo.color_temperature", level, level_error),
       field_update("moonhalo.light_mode", switch, switch_error),
+      update("ambient_light", ambient and ambient.current or nil, ambient_error),
     },
   }
 end
@@ -117,20 +129,24 @@ local function number_definition(id, label, maximum, code, mask)
   }
 end
 
-local function characteristics(brightness_maximum)
+local function characteristics(brightness_maximum, contrast_maximum)
   return {
-    monitor.brightness_definition(brightness_maximum),
-    number_definition("low_blue_light", "Low Blue Light", 5, BLUE, 0xFFFF),
-    {
+    in_group("general", monitor.brightness_definition(brightness_maximum)),
+    in_group("general", monitor.level_definition("contrast", "Contrast", CONTRAST, contrast_maximum)),
+    in_group("general", number_definition("low_blue_light", "Low Blue Light", 5, BLUE, 0xFFFF)),
+    in_group("moonhalo", {
       id = "moonhalo.power",
       label = "MoonHalo Power",
       spec = { kind = "boolean" },
       access = { read = true, write = true, notify = true },
       writes = { ddc = { { code = SWITCH, changeMask = 0x00FE } } },
-    },
-    number_definition("moonhalo.brightness", "MoonHalo Brightness", 10, LEVEL, 0x00FF),
-    number_definition("moonhalo.color_temperature", "MoonHalo Color Temperature", 7, LEVEL, 0xFF00),
-    {
+    }),
+    in_group("moonhalo", number_definition("moonhalo.brightness", "MoonHalo Brightness", 10, LEVEL, 0x00FF)),
+    in_group(
+      "moonhalo",
+      number_definition("moonhalo.color_temperature", "MoonHalo Color Temperature", 7, LEVEL, 0xFF00)
+    ),
+    in_group("moonhalo", {
       id = "moonhalo.light_mode",
       label = "MoonHalo Light Mode",
       spec = {
@@ -142,6 +158,14 @@ local function characteristics(brightness_maximum)
       },
       access = { read = true, write = true, notify = true },
       writes = { ddc = { { code = SWITCH, changeMask = 0xFF00 } } },
+    }),
+    {
+      id = "ambient_light",
+      label = "Ambient Light",
+      group = "sensors",
+      spec = { kind = "number", minimum = 0, maximum = AMBIENT_MAXIMUM, integer = true },
+      access = { read = true, write = false, notify = true },
+      writes = {},
     },
   }
 end
@@ -211,8 +235,9 @@ end
 local function write(ctx, endpoint, id, command)
   if id == "brightness" then
     return monitor.write_brightness(ctx, endpoint, command)
+  elseif id == "contrast" then
+    return monitor.write_level(ctx, endpoint, CONTRAST, "Contrast", command)
   end
-
   local code, maximum
   if id == "low_blue_light" then
     code, maximum = BLUE, 5
@@ -318,6 +343,14 @@ return {
           end
         end
 
+        local contrast, contrast_error = monitor.read_level(ctx, endpoint, CONTRAST, "Contrast")
+        if contrast_error then
+          if contrast_error.code == "ddc_error" or contrast_error.code == "unsupported_operation" then
+            return { devices = {} }
+          end
+          return { error = contrast_error }
+        end
+
         return {
           devices = {
             {
@@ -326,7 +359,12 @@ return {
               label = "BenQ RD280U",
               endpoints = { endpoint },
               identityPolicy = "same",
-              characteristics = characteristics(candidate.brightness.maximum),
+              groups = {
+                { id = "general", label = "General" },
+                { id = "moonhalo", label = "MoonHalo" },
+                { id = "sensors", label = "Sensors" },
+              },
+              characteristics = characteristics(candidate.brightness.maximum, contrast.maximum),
               pollIntervalMs = 2000,
               onRefresh = function(refresh_ctx)
                 return refresh(refresh_ctx, endpoint)

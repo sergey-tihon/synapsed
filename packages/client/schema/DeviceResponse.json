@@ -46,6 +46,14 @@
           ],
           "description": "Optional safe description of an error."
         },
+        "group": {
+          "description": "Identifier of the device group this characteristic belongs to, if the device declares groups.",
+          "pattern": "^[a-z][a-z0-9_.-]{0,63}$",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "id": {
           "description": "Stable identifier within the device.",
           "pattern": "^[a-z][a-z0-9_.-]{0,63}$",
@@ -88,6 +96,7 @@
       "required": [
         "id",
         "label",
+        "group",
         "spec",
         "access",
         "value",
@@ -116,6 +125,27 @@
         "read",
         "write",
         "notify"
+      ],
+      "type": "object"
+    },
+    "CharacteristicGroup": {
+      "description": "Named presentation section for related characteristics of one device.",
+      "properties": {
+        "id": {
+          "description": "Stable group identifier within the device.",
+          "pattern": "^[a-z][a-z0-9_.-]{0,63}$",
+          "type": "string"
+        },
+        "label": {
+          "description": "User-facing group label.",
+          "maxLength": 128,
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "label"
       ],
       "type": "object"
     },
@@ -309,6 +339,14 @@
           ],
           "description": "Optional safe description of a device-level error."
         },
+        "groups": {
+          "description": "Ordered presentation groups; empty when the device is ungrouped.",
+          "items": {
+            "$ref": "#/definitions/CharacteristicGroup"
+          },
+          "maxItems": 16,
+          "type": "array"
+        },
         "id": {
           "description": "Stable device identifier.",
           "pattern": "^[a-z][a-z0-9_.-]{0,63}$",
@@ -341,6 +379,7 @@
         "label",
         "status",
         "error",
+        "groups",
         "characteristics"
       ],
       "type": "object"

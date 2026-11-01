@@ -26,9 +26,11 @@ fn report(value: f64) -> (DriverStatus, Vec<Device>) {
             label: "Actual declaration".into(),
             status: DeviceStatus::Online,
             error: None,
+            groups: vec![],
             characteristics: vec![Characteristic {
                 id: "measurement".into(),
                 label: "Measurement".into(),
+                group: None,
                 spec: CharacteristicSpec::Number {
                     minimum: None,
                     maximum: None,
@@ -98,6 +100,7 @@ fn near_limit_report_cannot_prevent_later_fault_publication() {
                     .map(|index| Characteristic {
                         id: format!("text.{index}"),
                         label: "Observed text".into(),
+                        group: None,
                         spec: CharacteristicSpec::String { max_length: 1024 },
                         access: CharacteristicAccess {
                             read: true,

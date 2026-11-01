@@ -16,6 +16,7 @@ use axum::{
     routing::{get, post},
 };
 use bytes::Bytes;
+use chrono::{SecondsFormat, Utc};
 use futures_util::{SinkExt, StreamExt};
 use std::{
     future::Future,
@@ -27,8 +28,8 @@ use std::{
     time::{Duration, Instant},
 };
 use synapsed_api::{
-    ApiError, CharacteristicCommand, DeviceResponse, DeviceStatus, ErrorCode, LogLevel,
-    LogsResponse, ServerEvent,
+    ApiError, CharacteristicChange, CharacteristicCommand, DeviceResponse, DeviceStatus, ErrorCode,
+    LogLevel, LogsResponse, ServerEvent, Snapshot,
 };
 use synapsed_core::StateStore;
 use synapsed_plugins::PluginHost;
@@ -518,12 +519,45 @@ async fn send(
         Ok(Ok(()))
     )
 }
-fn log_frame(event: ServerEvent) -> Message {
+fn event_frame(event: ServerEvent) -> Message {
     Message::Text(
         serde_json::to_string(&event)
-            .expect("bounded log event serializes")
+            .expect("bounded event serializes")
             .into(),
     )
+}
+fn characteristic_changes(previous: &Snapshot, current: &Snapshot) -> Vec<CharacteristicChange> {
+    let timestamp = Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true);
+    let mut changes = Vec::new();
+    for device in &current.devices {
+        let Some(old_device) = previous.devices.iter().find(|old| old.id == device.id) else {
+            continue;
+        };
+        for characteristic in &device.characteristics {
+            let Some(old) = old_device
+                .characteristics
+                .iter()
+                .find(|old| old.id == characteristic.id)
+            else {
+                continue;
+            };
+            if old.value != characteristic.value
+                || old.status != characteristic.status
+                || old.error != characteristic.error
+            {
+                changes.push(CharacteristicChange {
+                    revision: current.revision.clone(),
+                    timestamp: timestamp.clone(),
+                    device_id: device.id.clone(),
+                    characteristic_id: characteristic.id.clone(),
+                    value: characteristic.value.clone(),
+                    status: characteristic.status,
+                    error: characteristic.error.clone(),
+                });
+            }
+        }
+    }
+    changes
 }
 async fn stream_events(socket: WebSocket, application: Application) {
     // Subscribe first; entries appended while taking the ring are deduplicated below.
@@ -549,13 +583,13 @@ async fn stream_events(socket: WebSocket, application: Application) {
         .await;
         return;
     }
-    changes.borrow_and_update();
+    let mut previous = changes.borrow_and_update().clone();
     if !send(&mut outgoing, Message::Text(application.snapshot_frame())).await {
         return;
     }
     if !send(
         &mut outgoing,
-        log_frame(ServerEvent::Logs { entries: recent }),
+        event_frame(ServerEvent::Logs { entries: recent }),
     )
     .await
     {
@@ -569,7 +603,7 @@ async fn stream_events(socket: WebSocket, application: Application) {
     ping.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut ping_sequence = 0u64;
     let mut expected_pong: Option<Bytes> = None;
-    loop {
+    'stream: loop {
         tokio::select! {
             _ = stopping.changed() => {
                 let _ = send(&mut outgoing, Message::Close(Some(CloseFrame { code: 1001, reason: "Daemon shutdown".into() }))).await;
@@ -596,14 +630,23 @@ async fn stream_events(socket: WebSocket, application: Application) {
             },
             changed = changes.changed() => {
                 if changed.is_err() { break; }
-                changes.borrow_and_update();
+                let current = changes.borrow_and_update().clone();
                 if !send(&mut outgoing, Message::Text(application.snapshot_frame())).await { break; }
+                for change in characteristic_changes(&previous, &current) {
+                    if !send(
+                        &mut outgoing,
+                        event_frame(ServerEvent::CharacteristicChanged { change }),
+                    ).await {
+                        break 'stream;
+                    }
+                }
+                previous = current;
             },
             event = live_logs.recv() => match event {
                 Ok((sequence, entry)) => {
                     if last_log.is_some_and(|last| sequence <= last) { continue; }
                     last_log = Some(sequence);
-                    if !send(&mut outgoing, log_frame(ServerEvent::Log { entry })).await { break; }
+                    if !send(&mut outgoing, event_frame(ServerEvent::Log { entry })).await { break; }
                 }
                 Err(broadcast::error::RecvError::Lagged(_)) => {
                     let _ = send(&mut outgoing, Message::Close(Some(CloseFrame { code: 1013, reason: "Logs lagged; reconnect for recent state".into() }))).await;

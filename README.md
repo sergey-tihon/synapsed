@@ -98,7 +98,7 @@ Tray/Raycast/Stream Deck remain separate clients; closing one does not stop the 
 
 ## Clients
 
-Open `http://127.0.0.1:24816/` for the daemon overview, read-only host hardware topology, discovered characteristics and bounded recent/live logs. Typed editors support fractional numbers, boolean, enum, Unicode strings and no-argument actions; read-only values have no mutation widgets. Apply is explicit; offline/failed readings remain visibly stale, not optimistically overwritten.
+Open `http://127.0.0.1:24816/` for the daemon overview, read-only host hardware topology, discovered characteristics grouped by driver, and the Events page with live characteristic changes and service logs (up to 200 of each). The installed RD280U driver also publishes contrast and a read-only, unitless ambient-light reading. Typed editors support fractional numbers, boolean, enum, Unicode strings and no-argument actions; read-only values have no mutation widgets. Apply is explicit; offline/failed readings remain visibly stale, not optimistically overwritten.
 
 ```sh
 synapsectl status
@@ -108,10 +108,12 @@ synapsectl set monitor brightness 60
 synapsectl step monitor brightness -1
 synapsectl toggle monitor moonhalo.power
 synapsectl --json watch
+synapsectl watch --changes
+synapsectl --json watch --changes
 synapsectl logs --follow
 ```
 
-IDs come from the current catalog, not a reserved monitor slot. `set` parses the complete typed argument; `invoke DEVICE CHARACTERISTIC` handles action characteristics. Mutations are not retried. CLI diagnostics use stderr; JSON watch/log-follow are NDJSON. Client endpoint precedence is `--endpoint > SYNAPSED_ENDPOINT > --client-config/default client.toml > default`; `deploy/client.example.toml` contains only `endpoint`. Stream Deck/tray use environment/default client config; Raycast uses its endpoint preference; Omarchy uses its endpoint widget setting; web uses its same origin.
+IDs come from the current catalog, not a reserved monitor slot. `set` parses the complete typed argument; `invoke DEVICE CHARACTERISTIC` handles action characteristics. Default `watch` remains snapshot-only; `watch --changes` prints live characteristic changes. Mutations are not retried. CLI diagnostics use stderr; JSON watch/change/log-follow are NDJSON. Client endpoint precedence is `--endpoint > SYNAPSED_ENDPOINT > --client-config/default client.toml > default`; `deploy/client.example.toml` contains only `endpoint`. Stream Deck/tray use environment/default client config; Raycast uses its endpoint preference; Omarchy uses its endpoint widget setting; web uses its same origin.
 
 ### Stream Deck
 

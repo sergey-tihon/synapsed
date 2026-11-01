@@ -98,6 +98,53 @@ test("parseSnapshot accepts only the expected snapshot envelope", () => {
   assert.equal(model.parseSnapshot("not json"), null);
 });
 
+test("characteristicSections preserves declared groups and characteristic order", () => {
+  const first = { id: "a", group: "general" };
+  const middle = { id: "b", group: "sensors" };
+  const second = { id: "c", group: "general" };
+  const sections = model.characteristicSections({
+    groups: [
+      { id: "general", label: "General" },
+      { id: "empty", label: "Empty" },
+      { id: "sensors", label: "Sensors" },
+    ],
+    characteristics: [first, middle, second],
+  });
+  assert.deepEqual(JSON.parse(JSON.stringify(sections)), [
+    { label: "General", characteristics: [first, second] },
+    { label: "Sensors", characteristics: [middle] },
+  ]);
+});
+
+test("characteristicSections keeps ungrouped and older snapshots in one null section", () => {
+  const characteristics = [{ id: "a" }, { id: "b" }];
+  assert.deepEqual(JSON.parse(JSON.stringify(model.characteristicSections({ groups: [], characteristics }))), [
+    { label: null, characteristics },
+  ]);
+  assert.deepEqual(JSON.parse(JSON.stringify(model.characteristicSections({ characteristics: [] }))), [
+    { label: null, characteristics: [] },
+  ]);
+});
+
+test("characteristicSections puts unmatched characteristics in a trailing null section", () => {
+  const grouped = { id: "a", group: "known" };
+  const unmatched = { id: "b", group: "missing" };
+  assert.deepEqual(
+    JSON.parse(
+      JSON.stringify(
+        model.characteristicSections({
+          groups: [{ id: "known", label: "Known" }],
+          characteristics: [unmatched, grouped],
+        }),
+      ),
+    ),
+    [
+      { label: "Known", characteristics: [grouped] },
+      { label: null, characteristics: [unmatched] },
+    ],
+  );
+});
+
 test("supportsStep and formatValue follow characteristic metadata and observations", () => {
   assert.equal(model.supportsStep(characteristic("number", { step: 0.5 })), true);
   assert.equal(model.supportsStep(characteristic("number")), false);

@@ -236,157 +236,176 @@ Panel {
             }
 
             Repeater {
-              model: device.characteristics
+              model: Model.characteristicSections(deviceSection.device)
               delegate: Column {
-                id: characteristicRow
                 required property var modelData
                 width: deviceSection.width
                 spacing: Style.space(4)
-                property var characteristic: modelData
-                property string key: root.rowKey(deviceSection.device.id, characteristic.id)
 
-                Row {
-                  width: parent.width
-                  spacing: Style.space(8)
-                  Text {
-                    id: characteristicLabel
-                    width: Math.min(Math.max(Style.space(100), parent.width * 0.48), parent.width)
-                    text: characteristic.label
-                    color: Commons.Color.popups.text
-                    font.family: Style.font.family
-                    font.pixelSize: Style.font.body
-                    elide: Text.ElideRight
-                  }
-                  Text {
-                    width: Math.max(0, parent.width - characteristicLabel.width - parent.spacing)
-                    text: Model.formatValue(characteristic) + (root.connection !== "online" ? " · stale" : "")
-                    color: Commons.Color.popups.text
-                    font.family: Style.font.family
-                    font.pixelSize: Style.font.bodySmall
-                    elide: Text.ElideRight
-                    horizontalAlignment: Text.AlignRight
-                  }
-                }
-
-                Loader {
-                  width: parent.width
-                  sourceComponent: characteristic.spec.kind === "number" && Model.controlFor(characteristic) === "slider" ? sliderControl
-                    : Model.controlFor(characteristic) === "stepper" ? stepperControl
-                    : characteristic.spec.kind === "boolean" && Model.controlFor(characteristic) === "toggle" ? toggleControl
-                    : characteristic.spec.kind === "enum" && Model.controlFor(characteristic) === "choice" ? choiceControl
-                    : characteristic.spec.kind === "action" && Model.controlFor(characteristic) === "invoke" ? invokeControl
-                    : Model.controlFor(characteristic) === "web" ? webControl
-                    : null
-                }
                 Text {
-                  visible: !!root.rowErrors[characteristicRow.key]
+                  visible: modelData.label !== null
                   width: parent.width
-                  text: root.rowErrors[characteristicRow.key] || ""
-                  color: Commons.Color.urgent
-                  wrapMode: Text.Wrap
+                  text: modelData.label || ""
+                  color: Commons.Color.popups.text
+                  font.family: Style.font.family
+                  font.pixelSize: Style.font.bodySmall
+                  font.bold: true
                 }
 
-                Component {
-                  id: sliderControl
-                  Item {
-                    width: characteristicRow.width
-                    implicitHeight: slider.implicitHeight
-                    PanelSlider {
-                      id: slider
-                      anchors.fill: parent
-                      bar: root.bar
-                      minimum: characteristicRow.characteristic.spec.minimum
-                      maximum: characteristicRow.characteristic.spec.maximum
-                      step: characteristicRow.characteristic.spec.step || (maximum - minimum) / 100
-                      integer: characteristicRow.characteristic.spec.integer
-                      value: typeof characteristicRow.characteristic.value === "number"
-                        ? characteristicRow.characteristic.value : minimum
-                      enabled: root.canCommand(deviceSection.device, characteristicRow.key)
-                        && typeof characteristicRow.characteristic.value === "number"
-                      onReleased: function(value) {
-                        root.dispatch(deviceSection.device.id, characteristicRow.characteristic.id,
-                          "set", Model.setArgument(characteristicRow.characteristic.spec, value));
-                      }
-                    }
-                    MouseArea {
-                      anchors.fill: parent
-                      acceptedButtons: Qt.NoButton
-                      onWheel: function(wheel) {
-                        root.handleWheel(deviceSection.device, characteristicRow.characteristic, characteristicRow.key, wheel.angleDelta.y);
-                        wheel.accepted = true;
-                      }
-                    }
-                  }
-                }
+                Repeater {
+                  model: modelData.characteristics
+                  delegate: Column {
+                    id: characteristicRow
+                    required property var modelData
+                    width: deviceSection.width
+                    spacing: Style.space(4)
+                    property var characteristic: modelData
+                    property string key: root.rowKey(deviceSection.device.id, characteristic.id)
 
-                Component {
-                  id: stepperControl
-                  Item {
-                    width: characteristicRow.width
-                    implicitHeight: buttons.implicitHeight
                     Row {
-                      id: buttons
+                      width: parent.width
                       spacing: Style.space(8)
-                      Button {
-                        text: "−"
+                      Text {
+                        id: characteristicLabel
+                        width: Math.min(Math.max(Style.space(100), parent.width * 0.48), parent.width)
+                        text: characteristic.label
+                        color: Commons.Color.popups.text
+                        font.family: Style.font.family
+                        font.pixelSize: Style.font.body
+                        elide: Text.ElideRight
+                      }
+                      Text {
+                        width: Math.max(0, parent.width - characteristicLabel.width - parent.spacing)
+                        text: Model.formatValue(characteristic) + (root.connection !== "online" ? " · stale" : "")
+                        color: Commons.Color.popups.text
+                        font.family: Style.font.family
+                        font.pixelSize: Style.font.bodySmall
+                        elide: Text.ElideRight
+                        horizontalAlignment: Text.AlignRight
+                      }
+                    }
+
+                    Loader {
+                      width: parent.width
+                      sourceComponent: characteristic.spec.kind === "number" && Model.controlFor(characteristic) === "slider" ? sliderControl
+                        : Model.controlFor(characteristic) === "stepper" ? stepperControl
+                        : characteristic.spec.kind === "boolean" && Model.controlFor(characteristic) === "toggle" ? toggleControl
+                        : characteristic.spec.kind === "enum" && Model.controlFor(characteristic) === "choice" ? choiceControl
+                        : characteristic.spec.kind === "action" && Model.controlFor(characteristic) === "invoke" ? invokeControl
+                        : Model.controlFor(characteristic) === "web" ? webControl
+                        : null
+                    }
+                    Text {
+                      visible: !!root.rowErrors[characteristicRow.key]
+                      width: parent.width
+                      text: root.rowErrors[characteristicRow.key] || ""
+                      color: Commons.Color.urgent
+                      wrapMode: Text.Wrap
+                    }
+
+                    Component {
+                      id: sliderControl
+                      Item {
+                        width: characteristicRow.width
+                        implicitHeight: slider.implicitHeight
+                        PanelSlider {
+                          id: slider
+                          anchors.fill: parent
+                          bar: root.bar
+                          minimum: characteristicRow.characteristic.spec.minimum
+                          maximum: characteristicRow.characteristic.spec.maximum
+                          step: characteristicRow.characteristic.spec.step || (maximum - minimum) / 100
+                          integer: characteristicRow.characteristic.spec.integer
+                          value: typeof characteristicRow.characteristic.value === "number"
+                            ? characteristicRow.characteristic.value : minimum
+                          enabled: root.canCommand(deviceSection.device, characteristicRow.key)
+                            && typeof characteristicRow.characteristic.value === "number"
+                          onReleased: function(value) {
+                            root.dispatch(deviceSection.device.id, characteristicRow.characteristic.id,
+                              "set", Model.setArgument(characteristicRow.characteristic.spec, value));
+                          }
+                        }
+                        MouseArea {
+                          anchors.fill: parent
+                          acceptedButtons: Qt.NoButton
+                          onWheel: function(wheel) {
+                            root.handleWheel(deviceSection.device, characteristicRow.characteristic, characteristicRow.key, wheel.angleDelta.y);
+                            wheel.accepted = true;
+                          }
+                        }
+                      }
+                    }
+
+                    Component {
+                      id: stepperControl
+                      Item {
+                        width: characteristicRow.width
+                        implicitHeight: buttons.implicitHeight
+                        Row {
+                          id: buttons
+                          spacing: Style.space(8)
+                          Button {
+                            text: "−"
+                            enabled: root.canCommand(deviceSection.device, characteristicRow.key)
+                            onClicked: root.dispatch(deviceSection.device.id, characteristicRow.characteristic.id, "step", -1)
+                          }
+                          Button {
+                            text: "+"
+                            enabled: root.canCommand(deviceSection.device, characteristicRow.key)
+                            onClicked: root.dispatch(deviceSection.device.id, characteristicRow.characteristic.id, "step", 1)
+                          }
+                        }
+                        MouseArea {
+                          anchors.fill: parent
+                          acceptedButtons: Qt.NoButton
+                          onWheel: function(wheel) {
+                            root.handleWheel(deviceSection.device, characteristicRow.characteristic, characteristicRow.key, wheel.angleDelta.y);
+                            wheel.accepted = true;
+                          }
+                        }
+                      }
+                    }
+
+                    Component {
+                      id: toggleControl
+                      ToggleSwitch {
+                        checked: characteristicRow.characteristic.value === true
+                        interactive: root.canCommand(deviceSection.device, characteristicRow.key)
+                        onToggled: root.dispatch(deviceSection.device.id, characteristicRow.characteristic.id, "toggle")
+                      }
+                    }
+
+                    Component {
+                      id: choiceControl
+                      ButtonGroup {
+                        options: characteristicRow.characteristic.spec.options.map(function(option) {
+                          return { value: option.value, label: option.label };
+                        })
+                        value: typeof characteristicRow.characteristic.value === "string" ? characteristicRow.characteristic.value : ""
                         enabled: root.canCommand(deviceSection.device, characteristicRow.key)
-                        onClicked: root.dispatch(deviceSection.device.id, characteristicRow.characteristic.id, "step", -1)
+                        onChanged: function(value) {
+                          root.dispatch(deviceSection.device.id, characteristicRow.characteristic.id, "set", value);
+                        }
                       }
+                    }
+
+                    Component {
+                      id: invokeControl
                       Button {
-                        text: "+"
+                        text: "Invoke"
                         enabled: root.canCommand(deviceSection.device, characteristicRow.key)
-                        onClicked: root.dispatch(deviceSection.device.id, characteristicRow.characteristic.id, "step", 1)
+                        onClicked: root.dispatch(deviceSection.device.id, characteristicRow.characteristic.id, "invoke")
                       }
                     }
-                    MouseArea {
-                      anchors.fill: parent
-                      acceptedButtons: Qt.NoButton
-                      onWheel: function(wheel) {
-                        root.handleWheel(deviceSection.device, characteristicRow.characteristic, characteristicRow.key, wheel.angleDelta.y);
-                        wheel.accepted = true;
+
+                    Component {
+                      id: webControl
+                      Button {
+                        text: "Edit in Web UI"
+                        enabled: root.endpoint !== ""
+                        onClicked: root.openWeb(deviceSection.device.id, characteristicRow.characteristic.id)
                       }
                     }
-                  }
-                }
-
-                Component {
-                  id: toggleControl
-                  ToggleSwitch {
-                    checked: characteristicRow.characteristic.value === true
-                    interactive: root.canCommand(deviceSection.device, characteristicRow.key)
-                    onToggled: root.dispatch(deviceSection.device.id, characteristicRow.characteristic.id, "toggle")
-                  }
-                }
-
-                Component {
-                  id: choiceControl
-                  ButtonGroup {
-                    options: characteristicRow.characteristic.spec.options.map(function(option) {
-                      return { value: option.value, label: option.label };
-                    })
-                    value: typeof characteristicRow.characteristic.value === "string" ? characteristicRow.characteristic.value : ""
-                    enabled: root.canCommand(deviceSection.device, characteristicRow.key)
-                    onChanged: function(value) {
-                      root.dispatch(deviceSection.device.id, characteristicRow.characteristic.id, "set", value);
-                    }
-                  }
-                }
-
-                Component {
-                  id: invokeControl
-                  Button {
-                    text: "Invoke"
-                    enabled: root.canCommand(deviceSection.device, characteristicRow.key)
-                    onClicked: root.dispatch(deviceSection.device.id, characteristicRow.characteristic.id, "invoke")
-                  }
-                }
-
-                Component {
-                  id: webControl
-                  Button {
-                    text: "Edit in Web UI"
-                    enabled: root.endpoint !== ""
-                    onClicked: root.openWeb(deviceSection.device.id, characteristicRow.characteristic.id)
                   }
                 }
               }

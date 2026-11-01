@@ -12,9 +12,9 @@ use std::{
     time::Duration,
 };
 use synapsed_api::{
-    ApiError, Characteristic, CharacteristicCommand, CharacteristicSpec, CharacteristicValue,
-    DeviceResponse, ErrorCode, ErrorResponse, InventoryResponse, LogEntry, LogsResponse,
-    MAX_COMMAND_BYTES, ServerEvent, Snapshot, StatusResponse, parse_revision,
+    ApiError, Characteristic, CharacteristicChange, CharacteristicCommand, CharacteristicSpec,
+    CharacteristicValue, DeviceResponse, ErrorCode, ErrorResponse, InventoryResponse, LogEntry,
+    LogsResponse, MAX_COMMAND_BYTES, ServerEvent, Snapshot, StatusResponse, parse_revision,
 };
 use tokio::{
     net::TcpStream,
@@ -154,6 +154,7 @@ pub fn parse_value(
 pub enum ClientEvent {
     Snapshot(Arc<Snapshot>),
     Logs(Vec<LogEntry>),
+    CharacteristicChanged(CharacteristicChange),
     Log(LogEntry),
 }
 
@@ -623,6 +624,9 @@ impl EventStream {
                     Some(state.recent_logs(self.guard.token, entries)?)
                 }
                 ServerEvent::Log { entry } => state.live_log(self.guard.token, entry)?,
+                ServerEvent::CharacteristicChanged { change } => {
+                    Some(ClientEvent::CharacteristicChanged(change))
+                }
             };
             if let Some(event) = event {
                 return Ok(Some(event));

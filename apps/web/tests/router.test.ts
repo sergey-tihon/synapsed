@@ -17,6 +17,7 @@ describe("hash routes", () => {
     { page: "devices" },
     { page: "device", deviceId: "dock/a?b&c#d", characteristicId: "mode/level?x#y&z" },
     { page: "device", deviceId: "standalone", characteristicId: null },
+    { page: "events" },
     { page: "logs", level: "warn" },
     { page: "logs", level: "all" },
     { page: "not-found" },
@@ -32,13 +33,15 @@ describe("hash routes", () => {
     });
   });
 
-  it("drops malformed filter values and unknown page paths", () => {
+  it("drops malformed filters and keeps events separate from logs", () => {
     expect(parseRoute("#/hardware?kind=usb,display,unknown&attach=invalid&driver=bogus&connected=yes&q=%ZZ")).toEqual({
       page: "hardware",
       filters: { kinds: ["usb", "display"], attachment: "all", driver: "any", connected: false, q: "" },
     });
     expect(parseRoute("#/devices/%E0%A4%A")).toEqual({ page: "not-found" });
     expect(parseRoute("#/missing")).toEqual({ page: "not-found" });
+    expect(parseRoute("#/events?level=warn")).toEqual({ page: "events" });
     expect(parseRoute("#/logs?level=verbose")).toEqual({ page: "logs", level: "all" });
+    expect(parseRoute("#/logs")).toEqual({ page: "logs", level: "all" });
   });
 });

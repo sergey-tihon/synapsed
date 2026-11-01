@@ -1,9 +1,10 @@
 use serde::Serialize;
 use std::io::{self, Write};
 use synapsed_api::{
-    Characteristic, CharacteristicSpec, CharacteristicStatus, CharacteristicValue, Device,
-    InventoryNode, InventoryNodeKind, InventoryRelation, InventoryResponse, InventoryRule,
-    InventorySourceKind, LogEntry, LogsResponse, Snapshot, StatusResponse,
+    Characteristic, CharacteristicChange, CharacteristicSpec, CharacteristicStatus,
+    CharacteristicValue, Device, InventoryNode, InventoryNodeKind, InventoryRelation,
+    InventoryResponse, InventoryRule, InventorySourceKind, LogEntry, LogsResponse, Snapshot,
+    StatusResponse,
 };
 
 pub struct Output {
@@ -70,7 +71,7 @@ impl Output {
             return self.data(characteristic);
         }
         let mut text = format!("Device: {device}\n");
-        render_characteristic(&mut text, characteristic);
+        render_characteristic(&mut text, characteristic, "");
         self.text(&text)
     }
     pub fn inventory(&self, inventory: &InventoryResponse) -> io::Result<()> {
@@ -99,6 +100,30 @@ impl Output {
             "{} {:?} [{}] #{} {}\n",
             log.timestamp, log.level, log.target, log.id, log.message
         ))
+    }
+    pub fn change(&self, change: &CharacteristicChange) -> io::Result<()> {
+        if self.json {
+            return self.data(change);
+        }
+        let value = change
+            .value
+            .as_ref()
+            .map(value_text)
+            .unwrap_or_else(|| "none".to_owned());
+        let mut line = format!(
+            "{} #{} {}/{} = {} | {:?}",
+            change.timestamp,
+            change.revision,
+            change.device_id,
+            change.characteristic_id,
+            value,
+            change.status
+        );
+        if let Some(error) = &change.error {
+            line.push_str(&format!(" — {:?}: {}", error.code, error.message));
+        }
+        line.push('\n');
+        self.text(&line)
     }
 }
 fn inventory_json(inventory: &InventoryResponse) -> io::Result<String> {
@@ -228,15 +253,21 @@ fn render_device(text: &mut String, device: &Device) {
     if let Some(error) = &device.error {
         text.push_str(&format!("  Error: {:?}: {}\n", error.code, error.message));
     }
-    for characteristic in &device.characteristics {
-        render_characteristic(text, characteristic);
+    for (group, indices) in device.characteristic_sections() {
+        let indent = if let Some(group) = group {
+            text.push_str(&format!("  [{}]\n", group.label));
+            "  "
+        } else {
+            ""
+        };
+        for index in indices {
+            render_characteristic(text, &device.characteristics[index], indent);
+        }
     }
 }
-fn render_characteristic(text: &mut String, characteristic: &Characteristic) {
+fn render_characteristic(text: &mut String, characteristic: &Characteristic, indent: &str) {
     let value = match &characteristic.value {
-        Some(CharacteristicValue::Boolean(value)) => value.to_string(),
-        Some(CharacteristicValue::Number(value)) => value.to_string(),
-        Some(CharacteristicValue::String(value)) => format!("{value:?}"),
+        Some(value) => value_text(value),
         None if matches!(characteristic.spec, CharacteristicSpec::Action) => {
             "Invoke (no stored value)".to_owned()
         }
@@ -249,12 +280,15 @@ fn render_characteristic(text: &mut String, characteristic: &Characteristic) {
             ""
         };
     text.push_str(&format!(
-        "  {} ({}) = {}{} | {:?}\n",
-        characteristic.id, characteristic.label, value, stale, characteristic.status
+        "{}  {} ({}) = {}{} | {:?}\n",
+        indent, characteristic.id, characteristic.label, value, stale, characteristic.status
     ));
     text.push_str(&format!(
-        "    Access: read={} write={} notify={}\n",
-        characteristic.access.read, characteristic.access.write, characteristic.access.notify
+        "{}    Access: read={} write={} notify={}\n",
+        indent,
+        characteristic.access.read,
+        characteristic.access.write,
+        characteristic.access.notify
     ));
     match &characteristic.spec {
         CharacteristicSpec::Number {
@@ -264,24 +298,69 @@ fn render_characteristic(text: &mut String, characteristic: &Characteristic) {
             integer,
             unit,
         } => {
-            text.push_str(&format!("    Number: minimum={minimum:?} maximum={maximum:?} step={step:?} integer={integer} unit={}\n", unit.as_deref().unwrap_or("none")));
+            text.push_str(&format!("{}    Number: minimum={minimum:?} maximum={maximum:?} step={step:?} integer={integer} unit={}\n", indent, unit.as_deref().unwrap_or("none")));
         }
         CharacteristicSpec::Enum { options } => {
-            text.push_str("    Enum options:");
+            text.push_str(&format!("{}    Enum options:", indent));
             for option in options {
                 text.push_str(&format!(" {:?} ({})", option.value, option.label));
             }
             text.push('\n');
         }
-        CharacteristicSpec::String { max_length } => {
-            text.push_str(&format!("    String: maximum {max_length} characters\n"))
+        CharacteristicSpec::String { max_length } => text.push_str(&format!(
+            "{}    String: maximum {max_length} characters\n",
+            indent
+        )),
+        CharacteristicSpec::Boolean => {
+            text.push_str(&format!("{}    Boolean: true or false\n", indent))
         }
-        CharacteristicSpec::Boolean => text.push_str("    Boolean: true or false\n"),
-        CharacteristicSpec::Action => text.push_str("    Action: invoke without arguments\n"),
+        CharacteristicSpec::Action => {
+            text.push_str(&format!("{}    Action: invoke without arguments\n", indent))
+        }
     }
     if let Some(error) = &characteristic.error {
-        text.push_str(&format!("    Error: {:?}: {}\n", error.code, error.message));
+        text.push_str(&format!(
+            "{}    Error: {:?}: {}\n",
+            indent, error.code, error.message
+        ));
     }
+}
+
+fn value_text(value: &CharacteristicValue) -> String {
+    match value {
+        CharacteristicValue::Boolean(value) => value.to_string(),
+        CharacteristicValue::Number(value) => value.to_string(),
+        CharacteristicValue::String(value) => format!("{value:?}"),
+    }
+}
+
+#[test]
+fn grouped_device_text_uses_declared_sections() {
+    let device: Device = serde_json::from_value(serde_json::json!({
+            "id": "monitor", "driver": "test-driver", "kind": "display", "label": "Monitor",
+            "status": "online", "error": null,
+            "groups": [{"id": "general", "label": "General"}, {"id": "sensors", "label": "Sensors"}],
+            "characteristics": [
+                {"id": "brightness", "label": "Brightness", "group": "general", "spec": {"kind": "number", "minimum": 0, "maximum": 100, "step": 5, "integer": true, "unit": null}, "access": {"read": true, "write": true, "notify": true}, "value": 50, "status": "ok", "error": null},
+                {"id": "ambient_light", "label": "Ambient Light", "group": "sensors", "spec": {"kind": "number", "minimum": 0, "maximum": 1000, "step": null, "integer": true, "unit": null}, "access": {"read": true, "write": false, "notify": true}, "value": 80, "status": "ok", "error": null}
+            ]
+        })).unwrap();
+    let mut text = String::new();
+    render_device(&mut text, &device);
+    assert_eq!(
+        text,
+        concat!(
+            "Device monitor: Monitor | kind=display | driver=test-driver | Online\n",
+            "  [General]\n",
+            "    brightness (Brightness) = 50 | Ok\n",
+            "      Access: read=true write=true notify=true\n",
+            "      Number: minimum=Some(0.0) maximum=Some(100.0) step=Some(5.0) integer=true unit=none\n",
+            "  [Sensors]\n",
+            "    ambient_light (Ambient Light) = 80 | Ok\n",
+            "      Access: read=true write=false notify=true\n",
+            "      Number: minimum=Some(0.0) maximum=Some(1000.0) step=None integer=true unit=none\n"
+        )
+    );
 }
 
 #[cfg(test)]

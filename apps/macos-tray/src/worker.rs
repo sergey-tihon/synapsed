@@ -318,7 +318,11 @@ async fn subscribe(client: Client, mailbox: Mailbox, mut cancel: watch::Receiver
                         Ok(Some(ClientEvent::Snapshot(_))) => {
                             mailbox.state(&client, Connection::Online, None)
                         }
-                        Ok(Some(ClientEvent::Logs(_) | ClientEvent::Log(_))) => {}
+                        Ok(Some(
+                            ClientEvent::Logs(_)
+                            | ClientEvent::Log(_)
+                            | ClientEvent::CharacteristicChanged(_),
+                        )) => {}
                         Ok(None) => break ClientError::Network,
                         Err(error) => break error,
                     }

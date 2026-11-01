@@ -223,6 +223,38 @@ async fn next_snapshot(events: &mut synapsed_client::EventStream) -> Arc<Snapsho
 }
 
 #[tokio::test]
+async fn characteristic_changed_event_passes_through_unchanged() {
+    let server = Server::start().await;
+    let mut events = server.client.events().await.unwrap();
+    assert_eq!(events.initial_snapshot().revision, "9");
+    assert!(matches!(
+        events.next().await.unwrap(),
+        Some(ClientEvent::Logs(_))
+    ));
+
+    let change = CharacteristicChange {
+        revision: "10".into(),
+        timestamp: "2026-11-01T09:08:29.123Z".into(),
+        device_id: "monitor".into(),
+        characteristic_id: "brightness".into(),
+        value: Some(CharacteristicValue::Number(55.0)),
+        status: CharacteristicStatus::Ok,
+        error: None,
+    };
+    server
+        .state
+        .frames
+        .send(Frame::Event(ServerEvent::CharacteristicChanged {
+            change: change.clone(),
+        }))
+        .unwrap();
+    assert!(matches!(
+        timeout(Duration::from_secs(2), events.next()).await.unwrap().unwrap(),
+        Some(ClientEvent::CharacteristicChanged(received)) if received == change
+    ));
+    events.close().await;
+}
+#[tokio::test]
 async fn delayed_mutation_and_http_reads_never_regress_numeric_revision() {
     let server = Server::start().await;
     let mut events = server.client.events().await.unwrap();

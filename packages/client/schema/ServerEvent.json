@@ -46,6 +46,14 @@
           ],
           "description": "Optional safe description of an error."
         },
+        "group": {
+          "description": "Identifier of the device group this characteristic belongs to, if the device declares groups.",
+          "pattern": "^[a-z][a-z0-9_.-]{0,63}$",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "id": {
           "description": "Stable identifier within the device.",
           "pattern": "^[a-z][a-z0-9_.-]{0,63}$",
@@ -88,6 +96,7 @@
       "required": [
         "id",
         "label",
+        "group",
         "spec",
         "access",
         "value",
@@ -116,6 +125,92 @@
         "read",
         "write",
         "notify"
+      ],
+      "type": "object"
+    },
+    "CharacteristicChange": {
+      "description": "One characteristic observation that changed between consecutive published snapshots.",
+      "properties": {
+        "characteristicId": {
+          "description": "Characteristic identifier.",
+          "pattern": "^[a-z][a-z0-9_.-]{0,63}$",
+          "type": "string"
+        },
+        "deviceId": {
+          "description": "Device identifier.",
+          "pattern": "^[a-z][a-z0-9_.-]{0,63}$",
+          "type": "string"
+        },
+        "error": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ApiError"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "New safe error, if any."
+        },
+        "revision": {
+          "description": "Revision of the snapshot that contains the new observation.",
+          "pattern": "^(0|[1-9][0-9]*)$",
+          "type": "string"
+        },
+        "status": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/CharacteristicStatus"
+            }
+          ],
+          "description": "New availability status."
+        },
+        "timestamp": {
+          "description": "UTC RFC 3339 time the daemon emitted the change.",
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]+)?(Z|\\+00:00)$",
+          "type": "string"
+        },
+        "value": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/CharacteristicValue"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "New observed value, if any."
+        }
+      },
+      "required": [
+        "revision",
+        "timestamp",
+        "deviceId",
+        "characteristicId",
+        "value",
+        "status",
+        "error"
+      ],
+      "type": "object"
+    },
+    "CharacteristicGroup": {
+      "description": "Named presentation section for related characteristics of one device.",
+      "properties": {
+        "id": {
+          "description": "Stable group identifier within the device.",
+          "pattern": "^[a-z][a-z0-9_.-]{0,63}$",
+          "type": "string"
+        },
+        "label": {
+          "description": "User-facing group label.",
+          "maxLength": 128,
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "label"
       ],
       "type": "object"
     },
@@ -309,6 +404,14 @@
           ],
           "description": "Optional safe description of a device-level error."
         },
+        "groups": {
+          "description": "Ordered presentation groups; empty when the device is ungrouped.",
+          "items": {
+            "$ref": "#/definitions/CharacteristicGroup"
+          },
+          "maxItems": 16,
+          "type": "array"
+        },
         "id": {
           "description": "Stable device identifier.",
           "pattern": "^[a-z][a-z0-9_.-]{0,63}$",
@@ -341,6 +444,7 @@
         "label",
         "status",
         "error",
+        "groups",
         "characteristics"
       ],
       "type": "object"
@@ -747,6 +851,28 @@
       "required": [
         "type",
         "entry"
+      ],
+      "type": "object"
+    },
+    {
+      "description": "A characteristic observation changed.",
+      "properties": {
+        "change": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/CharacteristicChange"
+            }
+          ],
+          "description": "Change event contents."
+        },
+        "type": {
+          "const": "characteristic_changed",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "change"
       ],
       "type": "object"
     }

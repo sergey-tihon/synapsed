@@ -29,6 +29,14 @@ export type ServerEvent =
       entry: LogEntry;
       type: "log";
       [k: string]: unknown | undefined;
+    }
+  | {
+      /**
+       * Change event contents.
+       */
+      change: CharacteristicChange;
+      type: "characteristic_changed";
+      [k: string]: unknown | undefined;
     };
 /**
  * Machine-readable category describing an API error.
@@ -175,6 +183,12 @@ export interface Device {
    */
   error: ApiError | null;
   /**
+   * Ordered presentation groups; empty when the device is ungrouped.
+   *
+   * @maxItems 16
+   */
+  groups: CharacteristicGroup[];
+  /**
    * Stable device identifier.
    */
   id: string;
@@ -204,6 +218,10 @@ export interface Characteristic {
    * Optional safe description of an error.
    */
   error: ApiError | null;
+  /**
+   * Identifier of the device group this characteristic belongs to, if the device declares groups.
+   */
+  group: string | null;
   /**
    * Stable identifier within the device.
    */
@@ -273,6 +291,20 @@ export interface EnumOption {
   [k: string]: unknown | undefined;
 }
 /**
+ * Named presentation section for related characteristics of one device.
+ */
+export interface CharacteristicGroup {
+  /**
+   * Stable group identifier within the device.
+   */
+  id: string;
+  /**
+   * User-facing group label.
+   */
+  label: string;
+  [k: string]: unknown | undefined;
+}
+/**
  * Status and optional error details for an installed driver.
  */
 export interface DriverStatus {
@@ -336,5 +368,39 @@ export interface LogEntry {
    * UTC RFC 3339 timestamp.
    */
   timestamp: string;
+  [k: string]: unknown | undefined;
+}
+/**
+ * One characteristic observation that changed between consecutive published snapshots.
+ */
+export interface CharacteristicChange {
+  /**
+   * Characteristic identifier.
+   */
+  characteristicId: string;
+  /**
+   * Device identifier.
+   */
+  deviceId: string;
+  /**
+   * New safe error, if any.
+   */
+  error: ApiError | null;
+  /**
+   * Revision of the snapshot that contains the new observation.
+   */
+  revision: string;
+  /**
+   * New availability status.
+   */
+  status: CharacteristicStatus;
+  /**
+   * UTC RFC 3339 time the daemon emitted the change.
+   */
+  timestamp: string;
+  /**
+   * New observed value, if any.
+   */
+  value: CharacteristicValue | null;
   [k: string]: unknown | undefined;
 }

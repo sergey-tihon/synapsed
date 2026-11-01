@@ -220,7 +220,7 @@
 }
 .quick-links {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: var(--space-3);
 }
 .quick-links a {
@@ -300,6 +300,13 @@
 .controls-section {
   display: grid;
   gap: var(--space-3);
+}
+.characteristic-group {
+  display: grid;
+  gap: var(--space-3, 12px);
+}
+.characteristic-group + .characteristic-group {
+  margin-top: var(--space-5, 24px);
 }
 .characteristic-grid {
   display: grid;
@@ -389,6 +396,59 @@
 .command-feedback {
   margin: var(--space-2) 0 0;
 }
+.activity-page {
+  gap: var(--space-3);
+}
+.activity-page .page-title {
+  gap: var(--space-1);
+  padding: 0;
+}
+.activity-page .page-title h1 {
+  font-size: clamp(1.7rem, 3vw, 2.4rem);
+}
+.activity-page .panel {
+  padding: var(--space-3) var(--space-4);
+}
+.activity-page .section-heading {
+  margin-bottom: var(--space-2);
+}
+.entry-filters {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+}
+.entry-search {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  color: var(--muted);
+  font-size: var(--small-size);
+  white-space: nowrap;
+}
+.entry-search input {
+  width: clamp(12rem, 26vw, 22rem);
+  min-width: 0;
+  padding: 0.35rem 0.55rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-raised);
+  color: var(--text);
+  font: inherit;
+}
+.entry-search input:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+.activity-page .logs-list {
+  max-height: calc(100vh - 13rem);
+  margin-top: var(--space-2);
+}
+.activity-page .logs-list li {
+  padding: var(--space-2) 0;
+}
+.activity-page .logs-list p {
+  margin-top: var(--space-1);
+}
 .logs-list {
   max-height: 44rem;
   overflow: auto;
@@ -477,5 +537,20 @@
   .hardware-section,
   .notice-panel {
     padding: var(--space-4);
+  }
+  .activity-page .section-heading {
+    align-items: stretch;
+    flex-direction: column;
+  }
+  .entry-filters {
+    align-items: stretch;
+    flex-direction: column;
+  }
+  .entry-search {
+    width: 100%;
+  }
+  .entry-search input {
+    width: 0;
+    flex: 1;
   }
 }

@@ -15,6 +15,7 @@ import Overview from "./pages/Overview";
 import Hardware from "./pages/Hardware";
 import Devices from "./pages/Devices";
 import Device from "./pages/Device";
+import Events from "./pages/Events";
 import Logs from "./pages/Logs";
 import NotFound from "./pages/NotFound";
 import "./App.css";
@@ -63,6 +64,9 @@ function AppContent(props: AppContentProps) {
       </Show>
       <Show when={props.route().page === "device"}>
         <Device deviceId={deviceId()} characteristicId={characteristicId()} />
+      </Show>
+      <Show when={props.route().page === "events"}>
+        <Events />
       </Show>
       <Show when={props.route().page === "logs"}>
         <Logs level={logLevel()} onLevelChange={updateLogLevel} />

@@ -43,6 +43,7 @@ export type InspectorDevice = {
   kind: string;
   driver: string;
   status: DeviceStatus;
+  groups: { id: string; label: string }[];
   characteristics: InspectorCharacteristic[];
 };
 

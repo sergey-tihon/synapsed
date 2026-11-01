@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { Action, ActionPanel, getPreferenceValues, List, openExtensionPreferences } from "@raycast/api";
+import { characteristicSections } from "@synapsed/client";
 import CharacteristicForm, { CommandActions } from "./characteristic-form";
 import { bindingKey, displayValue, Session, useSession } from "./session";
 
@@ -78,87 +79,95 @@ export default function Devices() {
           />
         </List.Section>
       )}
-      {snapshot?.devices.map((device) => (
-        <List.Section
-          key={device.id}
-          title={device.label}
-          subtitle={`${device.kind} · ${device.status}${stale ? " · Stale" : ""}`}
-        >
-          {device.characteristics.length === 0 && (
-            <List.Item id={`empty:${device.id}`} title="No characteristics declared" />
-          )}
-          {device.characteristics.map((characteristic) => {
-            const pending = state.pending.has(bindingKey(device.id, characteristic.id));
-            const enabled = !stale && device.status === "online" && !pending;
-            return (
-              <List.Item
-                key={characteristic.id}
-                id={bindingKey(device.id, characteristic.id)}
-                title={characteristic.label}
-                subtitle={displayValue(characteristic)}
-                accessories={[
-                  {
-                    text: pending ? "Pending" : `${characteristic.status}${stale ? " · Stale" : ""}`,
-                  },
-                ]}
-                detail={
-                  <List.Item.Detail
-                    metadata={
-                      <List.Item.Detail.Metadata>
-                        <List.Item.Detail.Metadata.Label title="Device" text={`${device.label} (${device.id})`} />
-                        <List.Item.Detail.Metadata.Label title="Driver" text={device.driver} />
-                        <List.Item.Detail.Metadata.Label title="Device status" text={device.status} />
-                        <List.Item.Detail.Metadata.Label title="Device error" text={device.error?.message ?? "None"} />
-                        <List.Item.Detail.Metadata.Separator />
-                        <List.Item.Detail.Metadata.Label title="Characteristic ID" text={characteristic.id} />
-                        <List.Item.Detail.Metadata.Label title="Observation" text={displayValue(characteristic)} />
-                        <List.Item.Detail.Metadata.Label
-                          title="Observation status"
-                          text={`${characteristic.status}${stale ? " (stale)" : ""}`}
-                        />
-                        <List.Item.Detail.Metadata.Label title="Error" text={characteristic.error?.message ?? "None"} />
-                        <List.Item.Detail.Metadata.Label
-                          title="Specification"
-                          text={JSON.stringify(characteristic.spec)}
-                        />
-                        <List.Item.Detail.Metadata.Label
-                          title="Access"
-                          text={`read=${characteristic.access.read}, write=${characteristic.access.write}, notify=${characteristic.access.notify}`}
-                        />
-                      </List.Item.Detail.Metadata>
-                    }
-                  />
-                }
-                actions={
-                  <ActionPanel>
-                    <Action.Push
-                      title={
-                        characteristic.access.write && characteristic.spec.kind !== "action"
-                          ? "Edit Characteristic"
-                          : "Inspect Characteristic"
-                      }
-                      target={
-                        <CharacteristicForm
-                          session={session}
-                          deviceId={device.id}
-                          characteristicId={characteristic.id}
-                        />
+      {snapshot?.devices.map((device) =>
+        characteristicSections(device.groups, device.characteristics).map((section) => (
+          <List.Section
+            key={`${device.id}:${section.group?.id ?? ""}`}
+            title={section.group ? `${device.label} · ${section.group.label}` : device.label}
+            subtitle={`${device.kind} · ${device.status}${stale ? " · Stale" : ""}`}
+          >
+            {section.characteristics.length === 0 && (
+              <List.Item id={`empty:${device.id}`} title="No characteristics declared" />
+            )}
+            {section.characteristics.map((characteristic) => {
+              const pending = state.pending.has(bindingKey(device.id, characteristic.id));
+              const enabled = !stale && device.status === "online" && !pending;
+              return (
+                <List.Item
+                  key={characteristic.id}
+                  id={bindingKey(device.id, characteristic.id)}
+                  title={characteristic.label}
+                  subtitle={displayValue(characteristic)}
+                  accessories={[
+                    {
+                      text: pending ? "Pending" : `${characteristic.status}${stale ? " · Stale" : ""}`,
+                    },
+                  ]}
+                  detail={
+                    <List.Item.Detail
+                      metadata={
+                        <List.Item.Detail.Metadata>
+                          <List.Item.Detail.Metadata.Label title="Device" text={`${device.label} (${device.id})`} />
+                          <List.Item.Detail.Metadata.Label title="Driver" text={device.driver} />
+                          <List.Item.Detail.Metadata.Label title="Device status" text={device.status} />
+                          <List.Item.Detail.Metadata.Label
+                            title="Device error"
+                            text={device.error?.message ?? "None"}
+                          />
+                          <List.Item.Detail.Metadata.Separator />
+                          <List.Item.Detail.Metadata.Label title="Characteristic ID" text={characteristic.id} />
+                          <List.Item.Detail.Metadata.Label title="Observation" text={displayValue(characteristic)} />
+                          <List.Item.Detail.Metadata.Label
+                            title="Observation status"
+                            text={`${characteristic.status}${stale ? " (stale)" : ""}`}
+                          />
+                          <List.Item.Detail.Metadata.Label
+                            title="Error"
+                            text={characteristic.error?.message ?? "None"}
+                          />
+                          <List.Item.Detail.Metadata.Label
+                            title="Specification"
+                            text={JSON.stringify(characteristic.spec)}
+                          />
+                          <List.Item.Detail.Metadata.Label
+                            title="Access"
+                            text={`read=${characteristic.access.read}, write=${characteristic.access.write}, notify=${characteristic.access.notify}`}
+                          />
+                        </List.Item.Detail.Metadata>
                       }
                     />
-                    <CommandActions
-                      session={session}
-                      deviceId={device.id}
-                      characteristic={characteristic}
-                      enabled={enabled}
-                    />
-                    {preferences}
-                  </ActionPanel>
-                }
-              />
-            );
-          })}
-        </List.Section>
-      ))}
+                  }
+                  actions={
+                    <ActionPanel>
+                      <Action.Push
+                        title={
+                          characteristic.access.write && characteristic.spec.kind !== "action"
+                            ? "Edit Characteristic"
+                            : "Inspect Characteristic"
+                        }
+                        target={
+                          <CharacteristicForm
+                            session={session}
+                            deviceId={device.id}
+                            characteristicId={characteristic.id}
+                          />
+                        }
+                      />
+                      <CommandActions
+                        session={session}
+                        deviceId={device.id}
+                        characteristic={characteristic}
+                        enabled={enabled}
+                      />
+                      {preferences}
+                    </ActionPanel>
+                  }
+                />
+              );
+            })}
+          </List.Section>
+        )),
+      )}
     </List>
   );
 }

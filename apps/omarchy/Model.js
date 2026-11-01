@@ -124,3 +124,27 @@ function commandArgs(endpoint, op, deviceId, characteristicId, argument) {
 function watchArgs(endpoint) {
   return ["synapsectl", "--endpoint", endpoint, "--json", "watch"];
 }
+
+function characteristicSections(device) {
+  var groups = device.groups || [];
+  var characteristics = device.characteristics || [];
+  if (groups.length === 0) {
+    return [{ label: null, characteristics: characteristics.slice() }];
+  }
+
+  var sections = [];
+  var matched = new Set();
+  groups.forEach(function (group) {
+    var members = characteristics.filter(function (characteristic) {
+      if (characteristic.group !== group.id) return false;
+      matched.add(characteristic);
+      return true;
+    });
+    if (members.length > 0) sections.push({ label: group.label, characteristics: members });
+  });
+  var unmatched = characteristics.filter(function (characteristic) {
+    return !matched.has(characteristic);
+  });
+  if (unmatched.length > 0) sections.push({ label: null, characteristics: unmatched });
+  return sections;
+}

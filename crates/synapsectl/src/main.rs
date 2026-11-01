@@ -67,11 +67,22 @@ enum Command {
         device: String,
         characteristic: String,
     },
-    Watch,
+    Watch {
+        /// Print characteristic change events instead of snapshots.
+        #[arg(long)]
+        changes: bool,
+    },
     Logs {
         #[arg(long)]
         follow: bool,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Stream {
+    Snapshots,
+    Changes,
+    Logs,
 }
 
 #[derive(Debug)]
@@ -225,8 +236,9 @@ async fn run(client: &Client, output: &Output, command: Command) -> Result<(), F
             )
             .await?;
         }
-        Command::Watch => follow(client, output, false).await?,
-        Command::Logs { follow: true } => follow(client, output, true).await?,
+        Command::Watch { changes: false } => follow(client, output, Stream::Snapshots).await?,
+        Command::Watch { changes: true } => follow(client, output, Stream::Changes).await?,
+        Command::Logs { follow: true } => follow(client, output, Stream::Logs).await?,
         Command::Logs { follow: false } => output.logs(&client.logs().await?)?,
     }
     Ok(())
@@ -266,7 +278,7 @@ async fn mutate(
     Ok(())
 }
 
-async fn follow(client: &Client, output: &Output, logs: bool) -> Result<(), Failure> {
+async fn follow(client: &Client, output: &Output, stream: Stream) -> Result<(), Failure> {
     let mut attempt = 0;
     loop {
         eprintln!("synapsectl: connecting to local Synapsed service");
@@ -277,20 +289,29 @@ async fn follow(client: &Client, output: &Output, logs: bool) -> Result<(), Fail
                     "synapsectl: connected (instance {})",
                     events.initial_snapshot().node.instance_id
                 );
-                if !logs {
+                if stream == Stream::Snapshots {
                     output.snapshot(events.initial_snapshot().as_ref())?;
                 }
                 loop {
                     match events.next().await {
-                        Ok(Some(ClientEvent::Snapshot(snapshot))) if !logs => {
+                        Ok(Some(ClientEvent::Snapshot(snapshot)))
+                            if stream == Stream::Snapshots =>
+                        {
                             output.snapshot(snapshot.as_ref())?
                         }
-                        Ok(Some(ClientEvent::Logs(entries))) if logs => {
+                        Ok(Some(ClientEvent::Logs(entries))) if stream == Stream::Logs => {
                             for entry in entries {
                                 output.log(&entry)?;
                             }
                         }
-                        Ok(Some(ClientEvent::Log(entry))) if logs => output.log(&entry)?,
+                        Ok(Some(ClientEvent::Log(entry))) if stream == Stream::Logs => {
+                            output.log(&entry)?
+                        }
+                        Ok(Some(ClientEvent::CharacteristicChanged(change)))
+                            if stream == Stream::Changes =>
+                        {
+                            output.change(&change)?
+                        }
                         Ok(Some(_)) => {}
                         Ok(None) => break ClientError::Network,
                         Err(error) => break error,

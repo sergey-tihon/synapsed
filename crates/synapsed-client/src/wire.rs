@@ -59,7 +59,9 @@ fn driver(value: &Value) -> Result<()> {
 fn characteristic(value: &Value) -> Result<()> {
     let value = fields(
         value,
-        &["id", "label", "spec", "access", "value", "status", "error"],
+        &[
+            "id", "label", "group", "spec", "access", "value", "status", "error",
+        ],
     )?;
     nullable_error(&value["error"])?;
     fields(&value["access"], &["read", "write", "notify"])?;
@@ -94,10 +96,14 @@ fn device(value: &Value) -> Result<()> {
             "label",
             "status",
             "error",
+            "groups",
             "characteristics",
         ],
     )?;
     nullable_error(&value["error"])?;
+    array(&value["groups"], |group| {
+        fields(group, &["id", "label"]).map(|_| ())
+    })?;
     array(&value["characteristics"], characteristic)
 }
 fn snapshot(value: &Value) -> Result<()> {
@@ -210,6 +216,23 @@ wire!(ServerEvent, |value: &Value| {
         Some("log") => log(object
             .get("entry")
             .ok_or(ClientError::Protocol("Missing event log."))?),
+        Some("characteristic_changed") => {
+            let change = fields(
+                object
+                    .get("change")
+                    .ok_or(ClientError::Protocol("Missing characteristic change."))?,
+                &[
+                    "revision",
+                    "timestamp",
+                    "deviceId",
+                    "characteristicId",
+                    "value",
+                    "status",
+                    "error",
+                ],
+            )?;
+            nullable_error(&change["error"])
+        }
         _ => Err(ClientError::Protocol("Unsupported server event.")),
     }
 });

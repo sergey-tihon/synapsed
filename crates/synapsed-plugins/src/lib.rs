@@ -1652,6 +1652,7 @@ mod inventory_tests {
             label: "Fixture display".to_owned(),
             status: DeviceStatus::Online,
             error: None,
+            groups: vec![],
             characteristics: Vec::new(),
         };
         let candidate = Candidate {

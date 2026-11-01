@@ -23,6 +23,7 @@ export function characteristic(
   return {
     id: "brightness",
     label: "Brightness",
+    group: null,
     spec,
     access: { read: true, write, notify: true },
     value,
@@ -39,6 +40,7 @@ export function device(chars: Characteristic[] = [characteristic()], status: Dev
     driver: "benq-rd280u",
     status,
     error: null,
+    groups: [],
     characteristics: chars,
   };
 }

@@ -8,10 +8,11 @@ interface Props extends ParentProps {
   connection: ClientStatus;
 }
 
-const navigation: { page: "overview" | "hardware" | "devices" | "logs"; label: string; href: string }[] = [
+const navigation: { page: "overview" | "hardware" | "devices" | "events" | "logs"; label: string; href: string }[] = [
   { page: "overview", label: "Overview", href: "#/" },
   { page: "hardware", label: "Hardware", href: "#/hardware" },
   { page: "devices", label: "Devices", href: "#/devices" },
+  { page: "events", label: "Events", href: "#/events" },
   { page: "logs", label: "Logs", href: "#/logs" },
 ];
 

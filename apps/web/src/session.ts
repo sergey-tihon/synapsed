@@ -2,6 +2,7 @@ import { createContext, createStore, onCleanup, onSettled, reconcile, useContext
 import {
   createClient,
   isCommandApplicable,
+  type CharacteristicChange,
   type CharacteristicCommand,
   type ClientStatus,
   type InventoryResponse,
@@ -19,6 +20,7 @@ export interface CommandResult {
 export interface SessionReducerState {
   instanceId: string | null;
   logs: LogEntry[];
+  changes: CharacteristicChange[];
   results: ReadonlyMap<string, CommandResult>;
 }
 
@@ -31,6 +33,13 @@ export function mergeLogs(current: readonly LogEntry[], incoming: readonly LogEn
   const byId = new Map(current.map((entry) => [entry.id, entry]));
   for (const entry of incoming) if (!byId.has(entry.id)) byId.set(entry.id, entry);
   return [...byId.values()].sort((left, right) => compareDecimal(left.id, right.id)).slice(-200);
+}
+
+export function appendChanges(
+  current: readonly CharacteristicChange[],
+  incoming: readonly CharacteristicChange[],
+): CharacteristicChange[] {
+  return [...current, ...incoming].slice(-200);
 }
 
 export function expireResultsOnRevision(
@@ -48,7 +57,7 @@ export function expireResultsOnRevision(
 
 export function resetForInstance(state: SessionReducerState, instanceId: string): SessionReducerState {
   if (state.instanceId === instanceId) return state;
-  return { instanceId, logs: [], results: new Map() };
+  return { instanceId, logs: [], changes: [], results: new Map() };
 }
 
 export function characteristicKey(deviceId: string, characteristicId: string): string {
@@ -62,6 +71,7 @@ export interface SynapsedSession {
   statusResponse(): { response: StatusResponse; receivedAt: number } | null;
   statusError(): string;
   logs(): LogEntry[];
+  changes(): CharacteristicChange[];
   pending(): ReadonlySet<string>;
   results(): ReadonlyMap<string, CommandResult>;
   execute(deviceId: string, characteristicId: string, command: CharacteristicCommand): Promise<boolean>;
@@ -83,11 +93,12 @@ export function createSynapsedSession(): SynapsedSession {
   );
   const [statusError, setStatusError] = createSignal("");
   const [logs, setLogs] = createSignal<LogEntry[]>([]);
+  const [changes, setChanges] = createSignal<CharacteristicChange[]>([]);
   const [pending, setPending] = createSignal<ReadonlySet<string>>(new Set());
   const [results, setResults] = createSignal<ReadonlyMap<string, CommandResult>>(new Map());
   const pendingOperations = new Map<string, number>();
   const operationRequests = new Map<number, AbortController>();
-  let reducerState: SessionReducerState = { instanceId: null, logs: [], results: new Map() };
+  let reducerState: SessionReducerState = { instanceId: null, logs: [], changes: [], results: new Map() };
   let client: SynapsedClient | undefined;
   let unsubscribe: (() => void) | undefined;
   let statusController: AbortController | undefined;
@@ -150,7 +161,7 @@ export function createSynapsedSession(): SynapsedSession {
     const nextResults = expireResultsOnRevision(reset.results, next.revision);
     reducerState = { ...reset, results: nextResults };
     setLogs(reducerState.logs);
-    setResults(nextResults);
+    setChanges(reducerState.changes);
     setState((draft) => {
       if (draft.snapshot === null) {
         draft.snapshot = next;
@@ -237,6 +248,12 @@ export function createSynapsedSession(): SynapsedSession {
           setLogs(reducerState.logs);
         }
       },
+      onCharacteristicChanged(change) {
+        if (alive) {
+          reducerState = { ...reducerState, changes: appendChanges(reducerState.changes, [change]) };
+          setChanges(reducerState.changes);
+        }
+      },
       onStatus(next) {
         if (!alive) return;
         setConnection(next);
@@ -275,6 +292,7 @@ export function createSynapsedSession(): SynapsedSession {
     statusResponse,
     statusError,
     logs,
+    changes,
     pending,
     results,
     execute,

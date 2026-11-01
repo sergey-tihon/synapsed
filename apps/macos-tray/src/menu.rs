@@ -430,108 +430,115 @@ impl NativeMenu {
                     None,
                 );
                 group.append(&detail).map_err(|error| error.to_string())?;
-                for (characteristic_index, characteristic) in
-                    device.characteristics.iter().enumerate()
-                {
-                    let header = Submenu::new(text(&characteristic.label), true);
-                    let reading =
-                        MenuItem::new(text(&observation(characteristic, false)), false, None);
-                    header
-                        .append_items(&[
-                            &reading,
-                            &MenuItem::new(text(&metadata(characteristic)), false, None),
-                        ])
-                        .map_err(|error| error.to_string())?;
-                    let mut row = Row {
-                        key: Key {
-                            device: device.id.clone(),
-                            characteristic: characteristic.id.clone(),
-                        },
-                        device_index,
-                        characteristic_index,
-                        header,
-                        observation: reading,
-                        items: Vec::new(),
-                    };
-                    let binding = |command| CommandBinding {
-                        catalog: snapshot.clone(),
-                        device_index,
-                        characteristic_index,
-                        command,
-                    };
-                    if characteristic.access.write {
-                        match &characteristic.spec {
-                            CharacteristicSpec::Number { step: Some(_), .. } => {
-                                menu.command(
-                                    &mut row,
-                                    binding(CharacteristicCommand::Step { steps: -1 }),
-                                    "Decrease",
-                                    None,
-                                    generation,
-                                    &mut sequence,
-                                )?;
-                                menu.command(
-                                    &mut row,
-                                    binding(CharacteristicCommand::Step { steps: 1 }),
-                                    "Increase",
-                                    None,
-                                    generation,
-                                    &mut sequence,
-                                )?;
-                            }
-                            CharacteristicSpec::Enum { options } => {
-                                for option in options {
-                                    let value = CharacteristicValue::String(option.value.clone());
+                for (section, indices) in device.characteristic_sections() {
+                    if let Some(section_group) = section {
+                        group
+                            .append(&MenuItem::new(text(&section_group.label), false, None))
+                            .map_err(|error| error.to_string())?;
+                    }
+                    for characteristic_index in indices {
+                        let characteristic = &device.characteristics[characteristic_index];
+                        let header = Submenu::new(text(&characteristic.label), true);
+                        let reading =
+                            MenuItem::new(text(&observation(characteristic, false)), false, None);
+                        header
+                            .append_items(&[
+                                &reading,
+                                &MenuItem::new(text(&metadata(characteristic)), false, None),
+                            ])
+                            .map_err(|error| error.to_string())?;
+                        let mut row = Row {
+                            key: Key {
+                                device: device.id.clone(),
+                                characteristic: characteristic.id.clone(),
+                            },
+                            device_index,
+                            characteristic_index,
+                            header,
+                            observation: reading,
+                            items: Vec::new(),
+                        };
+                        let binding = |command| CommandBinding {
+                            catalog: snapshot.clone(),
+                            device_index,
+                            characteristic_index,
+                            command,
+                        };
+                        if characteristic.access.write {
+                            match &characteristic.spec {
+                                CharacteristicSpec::Number { step: Some(_), .. } => {
                                     menu.command(
                                         &mut row,
-                                        binding(CharacteristicCommand::Set {
-                                            value: value.clone(),
-                                        }),
-                                        &option.label,
-                                        Some(value),
+                                        binding(CharacteristicCommand::Step { steps: -1 }),
+                                        "Decrease",
+                                        None,
+                                        generation,
+                                        &mut sequence,
+                                    )?;
+                                    menu.command(
+                                        &mut row,
+                                        binding(CharacteristicCommand::Step { steps: 1 }),
+                                        "Increase",
+                                        None,
                                         generation,
                                         &mut sequence,
                                     )?;
                                 }
-                            }
-                            CharacteristicSpec::Boolean => menu.command(
-                                &mut row,
-                                binding(CharacteristicCommand::Toggle {}),
-                                "Toggle",
-                                Some(CharacteristicValue::Boolean(true)),
-                                generation,
-                                &mut sequence,
-                            )?,
-                            CharacteristicSpec::Action => menu.command(
-                                &mut row,
-                                binding(CharacteristicCommand::Invoke {}),
-                                "Invoke",
-                                None,
-                                generation,
-                                &mut sequence,
-                            )?,
-                            CharacteristicSpec::String { .. }
-                            | CharacteristicSpec::Number { step: None, .. } => {
-                                let id = next_id(generation, &mut sequence);
-                                let edit =
-                                    MenuItem::with_id(id.clone(), "Edit in Web UI", true, None);
-                                row.header
-                                    .append(&edit)
-                                    .map_err(|error| error.to_string())?;
-                                menu.actions.insert(
-                                    id,
-                                    Action::Edit {
-                                        device: device.id.clone(),
-                                        characteristic: characteristic.id.clone(),
-                                    },
-                                );
+                                CharacteristicSpec::Enum { options } => {
+                                    for option in options {
+                                        let value =
+                                            CharacteristicValue::String(option.value.clone());
+                                        menu.command(
+                                            &mut row,
+                                            binding(CharacteristicCommand::Set {
+                                                value: value.clone(),
+                                            }),
+                                            &option.label,
+                                            Some(value),
+                                            generation,
+                                            &mut sequence,
+                                        )?;
+                                    }
+                                }
+                                CharacteristicSpec::Boolean => menu.command(
+                                    &mut row,
+                                    binding(CharacteristicCommand::Toggle {}),
+                                    "Toggle",
+                                    Some(CharacteristicValue::Boolean(true)),
+                                    generation,
+                                    &mut sequence,
+                                )?,
+                                CharacteristicSpec::Action => menu.command(
+                                    &mut row,
+                                    binding(CharacteristicCommand::Invoke {}),
+                                    "Invoke",
+                                    None,
+                                    generation,
+                                    &mut sequence,
+                                )?,
+                                CharacteristicSpec::String { .. }
+                                | CharacteristicSpec::Number { step: None, .. } => {
+                                    let id = next_id(generation, &mut sequence);
+                                    let edit =
+                                        MenuItem::with_id(id.clone(), "Edit in Web UI", true, None);
+                                    row.header
+                                        .append(&edit)
+                                        .map_err(|error| error.to_string())?;
+                                    menu.actions.insert(
+                                        id,
+                                        Action::Edit {
+                                            device: device.id.clone(),
+                                            characteristic: characteristic.id.clone(),
+                                        },
+                                    );
+                                }
                             }
                         }
+                        group
+                            .append(&row.header)
+                            .map_err(|error| error.to_string())?;
+                        menu.rows.push(row);
                     }
-                    group
-                        .append(&row.header)
-                        .map_err(|error| error.to_string())?;
-                    menu.rows.push(row);
                 }
                 menu.root
                     .append(&group)
@@ -609,13 +616,17 @@ fn same_structure(old: Option<&Snapshot>, new: Option<&Snapshot>) -> bool {
                     old.id == new.id
                         && old.driver == new.driver
                         && old.kind == new.kind
+                        && old.groups == new.groups
                         && old.characteristics.len() == new.characteristics.len()
                         && old
                             .characteristics
                             .iter()
                             .zip(&new.characteristics)
                             .all(|(old, new)| {
-                                old.id == new.id && old.spec == new.spec && old.access == new.access
+                                old.id == new.id
+                                    && old.group == new.group
+                                    && old.spec == new.spec
+                                    && old.access == new.access
                             })
                 })
         }
@@ -745,9 +756,11 @@ mod tests {
                 label: "Device".into(),
                 status: DeviceStatus::Online,
                 error: None,
+                groups: vec![],
                 characteristics: vec![Characteristic {
                     id: "value".into(),
                     label: "Value".into(),
+                    group: None,
                     spec: CharacteristicSpec::Boolean,
                     access: CharacteristicAccess {
                         read: true,
