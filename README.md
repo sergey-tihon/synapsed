@@ -2,6 +2,12 @@
 
 A Rust user daemon for macOS Apple Silicon and Linux x86_64, with deployed Lua hardware drivers and one local device/characteristic API. CLI, embedded SolidJS 2 dashboard, Stream Deck, macOS menu-bar, Raycast and Omarchy bar-widget clients share confirmed state over HTTP/WebSocket. Clients never access monitor hardware.
 
+## Architecture
+
+![Synapsed architecture diagram showing clients, the local daemon and plugin host, driver abstractions, and hardware layers](docs/synapsed-architecture.png)
+
+The Local API, web UI, Stream Deck, Omarchy, macOS tray, Raycast, `synapsectl`, Lua plugin host, and current DDC/CI drivers are implemented. The Home Assistant plugin and the USB, Bluetooth, network, and serial driver/channel blocks are planned or illustrative extension points, not shipped capabilities; this phase remains loopback-only.
+
 ## Requirements and boundaries
 
 - Daemon/CLI archives need no Node.js or Rust installation. For builds and detailed component source setup, see [CONTRIBUTE.md](CONTRIBUTE.md).
