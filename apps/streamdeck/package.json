@@ -34,7 +34,7 @@
     "@solidjs/vite-plugin": "3.0.0-next.35",
     "@solidjs/web": "2.0.0-rc.15",
     "@tsconfig/node24": "24.0.1",
-    "@types/node": "24.1.0",
+    "@types/node": "26.6.6",
     "jsdom": "26.1.0",
     "rollup": "4.67.2",
     "solid-js": "2.0.0-rc.15",
