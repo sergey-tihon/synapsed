@@ -1,22 +1,83 @@
 use super::*;
-use crate::{
-    Coordinator, PluginConfig, Route, loader,
-    test_support::{Hardware, Screen, catalog, registry},
-};
+use crate::capabilities::ddc::DdcCapabilityFactory;
+use crate::{Coordinator, PluginConfig, Route, loader};
 use synapsed_api::{CharacteristicStatus, DriverState, NodeInfo};
 use synapsed_core::EndpointGates;
+use synapsed_ddc::test_support::{FakeBackend, FakeEndpoint, FakeState, FakeStateHandle};
+use synapsed_ddc::{DdcClient, VcpValue};
 
+fn hardware() -> FakeStateHandle {
+    let values = [
+        (16, (40, 100)),
+        (25, (2, 5)),
+        (215, (0x0120, 0x0231)),
+        (217, (0x0305, 0x070a)),
+        (32, (125, 1000)),
+        (33, (25, 1000)),
+        (34, (0, 1)),
+        (35, (0, 1)),
+        (36, (0, 64)),
+        (45, (0, 65535)),
+    ]
+    .into_iter()
+    .chain(
+        (37..=69)
+            .filter(|code| *code != 45)
+            .map(|code| (code, (0, 65535))),
+    )
+    .map(|(code, (current, maximum))| (code, VcpValue { current, maximum }))
+    .collect();
+    let endpoint = FakeEndpoint {
+        key: "screen-a".into(),
+        manufacturer: Some("BNQ".into()),
+        product: Some(1),
+        product_name: Some("BenQ RD280U".into()),
+        identity: Some("a".repeat(64)),
+        replies: values,
+    };
+    Arc::new(Mutex::new(FakeState {
+        endpoints: vec![endpoint],
+        ..FakeState::default()
+    }))
+}
+fn test_registry(state: &FakeStateHandle) -> CapabilityRegistry {
+    let owner_state = state.clone();
+    let client = DdcClient::start_with_backend(move || Ok(FakeBackend::new(owner_state))).unwrap();
+    let mut registry = CapabilityRegistry::default();
+    registry
+        .register(Arc::new(DdcCapabilityFactory::new(client)))
+        .unwrap();
+    registry
+}
+fn current(state: &FakeStateHandle, code: u8) -> u16 {
+    state.lock().unwrap().endpoints[0].replies[&code].current
+}
+fn mutate(state: &FakeStateHandle, code: u8, value: u16) {
+    state.lock().unwrap().endpoints[0]
+        .replies
+        .get_mut(&code)
+        .unwrap()
+        .current = value;
+}
 async fn configured() -> (
     Vm,
     Candidate,
     DeviceGrant,
     CapabilityRegistry,
-    Arc<Hardware>,
+    FakeStateHandle,
     loader::Catalog,
 ) {
-    let packages = catalog(&["typed-fixture"]);
-    let hardware = Hardware::new(vec![Screen::benq()]);
-    let registry = registry(hardware.clone());
+    let hardware = hardware();
+    let registry = test_registry(&hardware);
+    let packages = tempfile::tempdir().unwrap();
+    let source =
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/typed-fixture");
+    let target = packages.path().join("typed-fixture");
+    std::fs::create_dir(&target).unwrap();
+    for entry in std::fs::read_dir(source).unwrap() {
+        let entry = entry.unwrap();
+        std::fs::copy(entry.path(), target.join(entry.file_name())).unwrap();
+    }
     let config = PluginConfig {
         directory: packages.path().into(),
         directory_explicit: true,
@@ -107,10 +168,10 @@ async fn lua_faults_due_timer_precedes_queued_write_without_reserving_its_gates(
                 observed(&first, "invocations"),
                 CharacteristicValue::Number(1.0)
             );
-            hardware.mutate(32, 177);
+            mutate(&hardware, 32, 177);
             vm.active.get_mut("fixture").unwrap().timers[0].next = Instant::now();
             let cancellation = cancellation();
-            let current = Arc::new(Mutex::new(None));
+            let operation_state = Arc::new(Mutex::new(None));
             let accepting = AtomicBool::new(true);
             let (reply, response) = oneshot::channel();
             let (sender, mut receiver) = mpsc::channel(64);
@@ -124,7 +185,7 @@ async fn lua_faults_due_timer_precedes_queued_write_without_reserving_its_gates(
                     writes: candidate.writes["run"].clone(),
                     guard: InvocationGuard::new(Instant::now() + CALLBACK_LIMIT),
                     cancellation: cancellation.clone(),
-                    current: current.clone(),
+                    current: operation_state.clone(),
                     reply,
                 })
                 .unwrap();
@@ -148,7 +209,7 @@ async fn lua_faults_due_timer_precedes_queued_write_without_reserving_its_gates(
                 writes,
                 guard,
                 cancellation,
-                current,
+                current: current_operation,
                 reply,
             } = receiver.recv().await.unwrap()
             else {
@@ -164,7 +225,7 @@ async fn lua_faults_due_timer_precedes_queued_write_without_reserving_its_gates(
                     writes,
                     guard,
                     cancellation.clone(),
-                    current.clone(),
+                    current_operation.clone(),
                     &accepting,
                 )
                 .await;
@@ -178,15 +239,14 @@ async fn lua_faults_due_timer_precedes_queued_write_without_reserving_its_gates(
                 observed(&second, "temperature"),
                 CharacteristicValue::Number(17.7)
             );
-            assert_eq!(hardware.current(45), 2);
+            assert_eq!(current(&hardware, 45), 2);
             assert_eq!(
                 hardware
-                    .state
                     .lock()
                     .unwrap()
-                    .writes
+                    .set_calls
                     .iter()
-                    .filter(|(code, _)| *code == 45)
+                    .filter(|(_, code, _)| *code == 45)
                     .count(),
                 2
             );
@@ -200,7 +260,7 @@ async fn lua_faults_due_timer_precedes_queued_write_without_reserving_its_gates(
                     .sequence()
                     > timer_sequence
             );
-            assert!(current.lock().unwrap().is_none());
+            assert!(operation_state.lock().unwrap().is_none());
             vm.shutdown(Instant::now() + CALLBACK_LIMIT).await.unwrap();
             registry
                 .shutdown(Instant::now() + CALLBACK_LIMIT)
@@ -222,7 +282,7 @@ async fn lua_faults_older_timer_report_cannot_replace_confirmation_but_fatal_lat
             let older = older.unwrap();
             let (confirmed, sequence) = invoke(&mut vm, &candidate, &grant).await;
             assert!(sequence > old_sequence);
-            assert_eq!(hardware.current(45), 2);
+            assert_eq!(current(&hardware, 45), 2);
             let store = StateStore::new(NodeInfo {
                 node_id: "00000000-0000-4000-8000-000000000001".into(),
                 instance_id: "00000000-0000-4000-8000-000000000002".into(),
@@ -257,6 +317,9 @@ async fn lua_faults_older_timer_report_cannot_replace_confirmation_but_fatal_lat
                 last: BTreeMap::new(),
                 dominance: BTreeMap::new(),
                 current: Arc::new(Mutex::new(None)),
+                binding_updates: tokio::sync::watch::channel(Arc::new(BTreeMap::new())).0,
+                #[cfg(debug_assertions)]
+                discovery_round: 0,
             };
             host.publish().unwrap();
             let revision = store.snapshot().revision.clone();

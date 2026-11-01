@@ -2,7 +2,8 @@ use serde::Serialize;
 use std::io::{self, Write};
 use synapsed_api::{
     Characteristic, CharacteristicSpec, CharacteristicStatus, CharacteristicValue, Device,
-    LogEntry, LogsResponse, Snapshot, StatusResponse,
+    InventoryNode, InventoryNodeKind, InventoryRelation, InventoryResponse, InventoryRule,
+    InventorySourceKind, LogEntry, LogsResponse, Snapshot, StatusResponse,
 };
 
 pub struct Output {
@@ -72,6 +73,12 @@ impl Output {
         render_characteristic(&mut text, characteristic);
         self.text(&text)
     }
+    pub fn inventory(&self, inventory: &InventoryResponse) -> io::Result<()> {
+        if self.json {
+            return self.text(&inventory_json(inventory)?);
+        }
+        self.text(&render_inventory(inventory))
+    }
     pub fn logs(&self, logs: &LogsResponse) -> io::Result<()> {
         if self.json {
             return self.data(logs);
@@ -92,6 +99,125 @@ impl Output {
             "{} {:?} [{}] #{} {}\n",
             log.timestamp, log.level, log.target, log.id, log.message
         ))
+    }
+}
+fn inventory_json(inventory: &InventoryResponse) -> io::Result<String> {
+    let mut output = serde_json::to_string(inventory)?;
+    output.push('\n');
+    Ok(output)
+}
+fn render_inventory(inventory: &InventoryResponse) -> String {
+    let mut text = String::from("Inventory:\nSources:\n");
+    for source in &inventory.sources {
+        text.push_str(&format!(
+            "  {}: {:?}",
+            inventory_source_kind(source.kind),
+            source.state
+        ));
+        if let Some(message) = &source.message {
+            text.push_str(&format!(" — {message}"));
+        }
+        text.push('\n');
+    }
+    let mut children = vec![Vec::new(); inventory.nodes.len()];
+    let by_id: std::collections::HashMap<&str, usize> = inventory
+        .nodes
+        .iter()
+        .enumerate()
+        .map(|(index, node)| (node.id.as_str(), index))
+        .collect();
+    let mut roots = Vec::new();
+    for (index, node) in inventory.nodes.iter().enumerate() {
+        if let Some(parent) = node.parent_id.as_deref() {
+            if let Some(parent) = by_id.get(parent) {
+                children[*parent].push(index);
+            }
+        } else {
+            roots.push(index);
+        }
+    }
+    let mut stack: Vec<_> = roots
+        .into_iter()
+        .rev()
+        .map(|index| (index, 0usize))
+        .collect();
+    let mut visited = vec![false; inventory.nodes.len()];
+    while let Some((index, depth)) = stack.pop() {
+        if visited[index] {
+            continue;
+        }
+        visited[index] = true;
+        render_inventory_node(&mut text, &inventory.nodes[index], depth);
+        stack.extend(
+            children[index]
+                .iter()
+                .rev()
+                .map(|child| (*child, depth + 1)),
+        );
+    }
+    text
+}
+
+fn inventory_source_kind(kind: InventorySourceKind) -> &'static str {
+    match kind {
+        InventorySourceKind::Usb => "usb",
+        InventorySourceKind::Thunderbolt => "thunderbolt",
+        InventorySourceKind::Ddc => "ddc",
+        InventorySourceKind::Bluetooth => "bluetooth",
+    }
+}
+fn render_inventory_node(text: &mut String, node: &InventoryNode, depth: usize) {
+    text.push_str(&"  ".repeat(depth));
+    text.push_str(inventory_kind(node.kind));
+    text.push_str(": ");
+    text.push_str(&node.label);
+    if let Some(detail) = &node.detail {
+        text.push_str(" — ");
+        text.push_str(detail);
+    }
+    if let Some(driver) = &node.driver {
+        text.push_str(&format!(
+            " [{} driver: {}]",
+            inventory_driver_class(driver.class),
+            driver.id
+        ));
+    }
+    if node.relation == InventoryRelation::Inferred
+        && let Some(rule) = node.rule
+    {
+        text.push_str(&format!(" [inferred: {}]", inventory_rule(rule)));
+    }
+    if !node.connected {
+        text.push_str(" [disconnected]");
+    }
+    text.push('\n');
+}
+
+fn inventory_kind(kind: InventoryNodeKind) -> &'static str {
+    match kind {
+        InventoryNodeKind::Host => "Host",
+        InventoryNodeKind::Controller => "Controller",
+        InventoryNodeKind::Dock => "Dock",
+        InventoryNodeKind::Hub => "Hub",
+        InventoryNodeKind::UsbDevice => "USB device",
+        InventoryNodeKind::Display => "Display",
+        InventoryNodeKind::BluetoothAdapter => "Bluetooth adapter",
+        InventoryNodeKind::BluetoothDevice => "Bluetooth device",
+    }
+}
+
+fn inventory_driver_class(class: synapsed_api::InventoryDriverClass) -> &'static str {
+    match class {
+        synapsed_api::InventoryDriverClass::Specialized => "specialized",
+        synapsed_api::InventoryDriverClass::Generic => "generic",
+    }
+}
+
+fn inventory_rule(rule: InventoryRule) -> &'static str {
+    match rule {
+        InventoryRule::Usb4Tunnel => "USB4 tunnel",
+        InventoryRule::VendorMatch => "vendor match",
+        InventoryRule::DriverLink => "driver link",
     }
 }
 fn render_device(text: &mut String, device: &Device) {
@@ -155,5 +281,52 @@ fn render_characteristic(text: &mut String, characteristic: &Characteristic) {
     }
     if let Some(error) = &characteristic.error {
         text.push_str(&format!("    Error: {:?}: {}\n", error.code, error.message));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn response() -> InventoryResponse {
+        serde_json::from_value(serde_json::json!({
+            "apiVersion": 1,
+            "instanceId": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+            "generatedAt": "2025-01-02T03:04:05Z",
+            "sources": [
+                {"kind": "usb", "state": "ok", "message": null},
+                {"kind": "ddc", "state": "not_scanned", "message": null}
+            ],
+            "nodes": [
+                {"id": "n0000000000000000", "parentId": null, "kind": "host", "label": "This machine", "detail": null, "vendorId": null, "productId": null, "speedMbps": null, "connected": true, "attachment": "host", "relation": "exact", "rule": null, "driver": null},
+                {"id": "n0000000000000001", "parentId": "n0000000000000000", "kind": "controller", "label": "Graphics", "detail": null, "vendorId": null, "productId": null, "speedMbps": null, "connected": true, "attachment": "host", "relation": "exact", "rule": null, "driver": null},
+                {"id": "n0000000000000002", "parentId": "n0000000000000001", "kind": "dock", "label": "TS4", "detail": null, "vendorId": null, "productId": null, "speedMbps": null, "connected": true, "attachment": "dock", "relation": "inferred", "rule": "usb4_tunnel", "driver": null}
+            ]
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn inventory_tree_is_indented_and_labels_inference() {
+        let response = response();
+        response.validate().unwrap();
+        assert_eq!(
+            render_inventory(&response),
+            "Inventory:\nSources:\n  usb: Ok\n  ddc: NotScanned\nHost: This machine\n  Controller: Graphics\n    Dock: TS4 [inferred: USB4 tunnel]\n"
+        );
+    }
+
+    #[test]
+    fn inventory_json_preserves_the_exact_response_object() {
+        let response = response();
+        let output = inventory_json(&response).unwrap();
+        assert_eq!(
+            output,
+            format!("{}\n", serde_json::to_string(&response).unwrap())
+        );
+        assert_eq!(
+            serde_json::from_str::<InventoryResponse>(&output).unwrap(),
+            response
+        );
     }
 }

@@ -21,9 +21,11 @@ dependencies: string[]
 supersedes: string[]
 capabilities: {capabilityId: versionInteger}
 permissions: {capabilityId: capabilitySpecificObject}
+inventory?: { usb?: [{vendorId,productId,role:"monitor-companion"|"device"}], bluetooth?: [{namePrefix,role:"monitor-companion"|"device"}] }
 ```
 
 Reject mismatched/invalid IDs, incompatible API versions, absent capability versions, missing/disabled/cyclic dependencies and supersedes cycles. Dependency failure disables dependants, not unrelated packages. Capability factories parse permissions; these are not opaque public API data.
+Optional inventory selectors are limited to16 total; USB vendor/product IDs are four lowercase hex digits and Bluetooth name prefixes are at most64 characters. They annotate only the separate read-only topology. A monitor-companion `driver_link` is inferred only for one unique selector match tied to that driver's unique DDC binding; selectors do not affect device discovery or write ownership.
 
 | Package     | Version / entry    | Dependencies / supersedes     | Capabilities / permissions                                      |
 | ----------- | ------------------ | ----------------------------- | --------------------------------------------------------------- |
@@ -38,7 +40,7 @@ Entry returns `{configure:function}`. `configure(settings:table)` returns `{disc
 
 `CapabilityRegistry::register(factory:Arc<dyn LuaCapabilityFactory>)->Result<(),DriverError>` rejects duplicate IDs. `LuaCapabilityFactory:Send+Sync` exposes `id()->&'static str`, `version()->u32`, `validate_permissions(&serde_json::Value)->Result<(),DriverError>` and `install(&mlua::Lua,InvocationContext)->mlua::Result<mlua::Table>`. Install occurs on the Lua thread; factories retain only safe native-client proxies. The daemon registers DdcCapabilityFactory v1, which knows VCP codes and permissions, not models. Unsupported versions/capabilities produce visible errors, never fake bindings. No exec/raw network capability is installed.
 
-`EndpointToken` is an opaque host-issued ID plus generation. `VcpValue` has `current:u16,maximum:u16`. Inventory exposes endpoints and sanitized ApiErrors. Endpoint descriptors contain token, capability=`ddc`, optional manufacturer/product/productName, and optional opaque SHA-256 identity of validated base EDID. No raw EDID, serial, native pointer or path escapes to Lua/public APIs.
+`EndpointToken` is an opaque host-issued ID plus generation. `VcpValue` has `current:u16,maximum:u16`. The DDC capability inventory exposes endpoints and sanitized ApiErrors. Endpoint descriptors contain token, capability=`ddc`, optional manufacturer/product/productName, and optional opaque SHA-256 identity of validated base EDID. No raw EDID, serial, native pointer or path escapes to Lua/public APIs.
 
 `DdcBackend::scan(&mut self)->Result<InventoryWithOwnedHandles,DriverError>` and `DdcTransport::{get_vcp(&mut self,code:u8),set_vcp(&mut self,code:u8,value:u16)}` run exclusively on the native owner thread. Raw Get returns VcpValue; raw Set returns unit. Backend injection is `start_with_backend<B,F>(factory:F)` where `B:DdcBackend+'static`, `F:FnOnce()->Result<B,DriverError>+Send+'static`; construct B/handles inside the worker, so B need not be Send. In-memory backends are test-only.
 

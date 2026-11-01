@@ -5,6 +5,9 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
+[lints]
+workspace = true
+
 [features]
 default = ["web-ui"]
 web-ui = ["dep:include_dir", "dep:mime_guess"]
@@ -14,26 +17,28 @@ synapsed-api = { path = "../synapsed-api" }
 synapsed-core = { path = "../synapsed-core" }
 synapsed-ddc = { path = "../synapsed-ddc" }
 synapsed-plugins = { path = "../synapsed-plugins" }
+synapsed-inventory = { path = "../synapsed-inventory" }
 axum = { version = "0.8", features = ["ws"] }
 bytes = "1"
-clap = { version = "4", features = ["derive"] }
+clap.workspace = true
 fs2 = "0.4"
-futures-util = "0.3"
+futures-util.workspace = true
 hostname = "0.4"
 include_dir = { version = "0.7.4", optional = true }
 mime_guess = { version = "2.0", optional = true }
-libc = "0.2"
+libc.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
-toml = "0.9"
-tracing = "0.1"
+toml.workspace = true
+tracing.workspace = true
 tracing-subscriber = { version = "0.3", features = ["registry"] }
 uuid = { version = "1", features = ["v4"] }
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 
 [dev-dependencies]
-reqwest = { version = "0.12", default-features = false, features = ["json"] }
-tempfile = "3"
+synapsed-ddc = { path = "../synapsed-ddc", features = ["test-support"] }
+reqwest.workspace = true
+tempfile.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
-tokio-tungstenite = "0.28"
+tokio-tungstenite.workspace = true

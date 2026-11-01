@@ -6,6 +6,15 @@
   "dependencies": ["generic-ddc"],
   "supersedes": ["generic-ddc"],
   "capabilities": { "ddc": 1 },
+  "inventory": {
+    "usb": [
+      {
+        "vendorId": "0bda",
+        "productId": "1100",
+        "role": "monitor-companion"
+      }
+    ]
+  },
   "permissions": {
     "ddc": { "read": [16, 25, 215, 217], "write": [16, 25, 215, 217] }
   }

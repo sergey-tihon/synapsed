@@ -2,44 +2,47 @@
 
 ## Status and scope
 
-This specification records Synapsed's architecture and extension boundaries, not evidence that builds, native clients or physical hardware have passed verification. The local system comprises a Rust host, deployed generic-DDC and BenQ RD280U Lua packages, a device-neutral API, shared clients, CLI, web, Stream Deck, macOS tray and Raycast. Reserved integrations below are not supported packages. No directory or empty crate is required merely because a future location is documented.
+This specification records Synapsed's architecture and extension boundaries, not evidence that builds, native clients or physical hardware have passed verification. The local system comprises a Rust host, deployed generic-DDC and BenQ RD280U Lua packages, a device-neutral API, shared clients, CLI, web, Stream Deck, macOS tray, Raycast and the Omarchy bar widget. Reserved integrations below are not supported packages. No directory or empty crate is required merely because a future location is documented.
 
 Keep the Stream Deck client in `apps/streamdeck`, separate from native transport and Lua driver policy. No Swift helper executable/build path remains. Preserve user work and vendor notices, including local sdpi-components v4.0.1/Lit notices.
 
 ## Ownership map
 
-| Location                                  | Responsibility                                                                                                                |
-| ----------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
-| `Cargo.toml`, `Cargo.lock`                | Rust workspace and canonical committed Rust dependency lock                                                                   |
-| `package.json`, `package-lock.json`       | Private `synapsed` npm workspace and one canonical committed npm lock                                                         |
-| `crates/synapsed-api`                     | Serializable public characteristic DTOs and explicit JSON Schema exporter                                                     |
-| `crates/synapsed-core`                    | Registry, validated state publication, operation ownership and lifecycle primitives                                           |
-| `crates/synapsed-ddc`                     | Native macOS/Linux DDC transport and protocol; no device publisher or model semantics                                         |
-| `crates/synapsed-plugins`                 | Package catalog, isolated-per-package Lua runtimes, discovery, arbitration, typed callbacks and versioned native bindings     |
-| `crates/synapsed`                         | Daemon composition, local HTTP/WS, configuration, logging and embedded built web assets                                       |
-| `crates/synapsed-client`                  | Hardware-independent Rust HTTP/WS client and client-only config                                                               |
-| `crates/synapsectl`                       | Typed CLI built on the Rust client                                                                                            |
-| `packages/client`                         | `@synapsed/client`: generated wire types/standalone validators and shared TS transport/helpers                                |
-| `apps/streamdeck`                         | `@synapsed/streamdeck`, client sources/configs and `com.sergey-tihon.synapsed.sdPlugin` assets; generic characteristic action |
-| `apps/web`                                | `@synapsed/web`, SolidJS 2 static CSR dashboard; `dist/client` embedded by daemon                                             |
-| `apps/macos-tray`                         | `synapsed-macos-tray`, native menu-bar client, no hardware owner                                                              |
-| `apps/raycast`                            | Unscoped `synapsed-raycast`, one Devices view command and typed forms                                                         |
-| `drivers/generic-ddc`                     | External `plugin.json`, `driver.lua`, reusable `monitor.lua`; standard brightness policy                                      |
-| `drivers/benq-rd280u`                     | External specialized Lua driver importing generic monitor logic                                                               |
-| `deploy/launchd`, `deploy/systemd`        | Separate user-service installation templates, never auto-enabled by builds                                                    |
-| `docs/adr`, `docs/specs`, `docs/hardware` | Decisions, normative contracts and hardware evidence/limits respectively                                                      |
+| Location                                  | Responsibility                                                                                                                                               |
+| ----------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `Cargo.toml`, `Cargo.lock`                | Rust workspace and canonical committed Rust dependency lock                                                                                                  |
+| `package.json`, `package-lock.json`       | Private `synapsed` npm workspace and one canonical committed npm lock                                                                                        |
+| `crates/synapsed-api`                     | Serializable public characteristic DTOs and explicit JSON Schema exporter                                                                                    |
+| `crates/synapsed-core`                    | Registry, validated state publication, operation ownership and lifecycle primitives                                                                          |
+| `crates/synapsed-ddc`                     | Native macOS/Linux DDC transport and protocol; no device publisher or model semantics                                                                        |
+| `crates/synapsed-inventory`               | Passive OS collectors and privacy-bounded topology construction; no hardware writes                                                                          |
+| `crates/synapsed-plugins`                 | Package catalog, isolated-per-package Lua runtimes, discovery, arbitration, typed callbacks and versioned native bindings                                    |
+| `crates/synapsed`                         | Daemon composition, local HTTP/WS, configuration, logging, read-only inventory composition and embedded built web assets                                     |
+| `crates/synapsed-client`                  | Hardware-independent Rust HTTP/WS client and client-only config                                                                                              |
+| `crates/synapsectl`                       | Typed CLI built on the Rust client                                                                                                                           |
+| `packages/client`                         | `@synapsed/client`: generated wire types/standalone validators and shared TS transport/helpers                                                               |
+| `apps/streamdeck`                         | `@synapsed/streamdeck`, client sources/configs and `com.sergey-tihon.synapsed.sdPlugin` assets; generic characteristic action                                |
+| `apps/web`                                | `@synapsed/web`, SolidJS 2 static CSR dashboard; `dist/client` embedded by daemon                                                                            |
+| `apps/macos-tray`                         | `synapsed-macos-tray`, native menu-bar client, no hardware owner                                                                                             |
+| `apps/raycast`                            | Unscoped `synapsed-raycast`, one Devices view command and typed forms                                                                                        |
+| `apps/omarchy`                            | Omarchy shell bar-widget plugin `sergey-tihon.synapsed`; plain QML/JS outside npm/Cargo workspaces; API client via installed `synapsectl`, no hardware owner |
+| `drivers/generic-ddc`                     | External `plugin.json`, `driver.lua`, reusable `monitor.lua`; standard brightness policy                                                                     |
+| `drivers/benq-rd280u`                     | External specialized Lua driver importing generic monitor logic                                                                                              |
+| `deploy/launchd`, `deploy/systemd`        | Separate user-service installation templates; Linux also has an explicit non-root installer, and builds never enable services                                |
+| `docs/adr`, `docs/specs`, `docs/hardware` | Decisions, normative contracts and hardware evidence/limits respectively                                                                                     |
 
 ## Workspace and dependency rules
 
-Rust uses edition 2024, resolver 3, rust-version at least 1.90, version 0.1.0 and `MIT OR Apache-2.0`; include both standard license texts. Register real implementations only, not empty future members. Platform-neutral host/client/CLI packages are default members. The real macOS tray is a workspace member built explicitly on macOS and excluded from Linux workspace build/test selection. Targets are Apple Silicon macOS and Linux x86_64/aarch64; Intel macOS and Windows are not newly promised.
+Rust uses edition 2024, resolver 3, the workspace Rust version and license declared in its manifest; include both standard license texts. Register real implementations only, not empty future members. Platform-neutral host/client/CLI packages are default members. The real macOS tray is a workspace member built explicitly on macOS and excluded from Linux workspace build/test selection. Targets are Apple Silicon macOS and Linux x86_64; Intel macOS and Windows are not newly promised.
 
-Root npm workspaces are exactly `packages/client`, `apps/web`, `apps/streamdeck`, `apps/raycast`, using npm and one root lockfile, not nested locks, pnpm, Bun, Turbo, Nx or just. Developer Node is at least 24. Keep pinned Stream Deck SDK dependencies and local sdpi-components v4.0.1. This SDPI version is not published on npm; the official distribution is a downloaded JS file, committed here for reproducible offline bundles with its license notices. Preserve Rollup module output, Node builtins, local SDK, watch restart and emitted `bin/package.json`. Root commands orchestrate current-host components; source workflows belong in `CONTRIBUTE.md`. Raycast's SDK-specific temporary canonical-lock alias and missing-tsc symlink accommodation do not establish a second lockfile.
+Root npm workspaces are exactly `packages/client`, `apps/web`, `apps/streamdeck`, `apps/raycast`, using npm and one root lockfile, not nested locks, pnpm, Bun, Turbo, Nx or just. `apps/omarchy` is not an npm workspace; its pure model test runs from root `npm test`. Developer Node requirement is declared in the root manifest. Keep Stream Deck SDK dependencies exactly pinned in the manifest and lockfile, with local sdpi-components and its license notices. Preserve Rollup module output, Node builtins, local SDK, watch restart and emitted `bin/package.json`. Root commands orchestrate current-host components; source workflows belong in `CONTRIBUTE.md`. Raycast's SDK-specific temporary canonical-lock alias and missing-tsc symlink accommodation do not establish a second lockfile.
 
 Dependencies flow as follows:
 
 - API owns public serializable characteristics only; no native handles, driver-private bindings, raw VCP endpoint or closed monitor/profile enums.
 - Core depends on API and owns registry/state/operation primitives.
 - DDC depends on core and native platform libraries. It never publishes devices, selects models, probes brightness autonomously or interprets BenQ packed fields.
+- Inventory collectors depend on public API DTOs and passive OS sources; the daemon merges sanitized records with cached DDC endpoints and Lua driver bindings without starting a DDC scan or writing hardware.
 - Plugins depends on API/core/mlua and the safe DDC client proxy. A versioned capability-factory registry installs transport bindings without model switches.
 - Daemon composes these components. Rust/TS clients and all UI consumers never depend on core, plugins or native transport.
 - Device kinds/characteristics are driver-declared data. New deployed drivers using available capabilities require no host/client rebuild; a genuinely new transport requires a Rust capability implementation.
@@ -56,15 +59,14 @@ The Stream Deck cutover intentionally replaces the historical `com.sergey-tihon.
 
 ## Reserved subsequent-feature map
 
-| Requested subsequent area        | Reserved implementation location and boundary                                                                                                                                                                                                                                             |
-| -------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Desk height over BLE             | `drivers/<verified-desk-model>/` atop a future shared `crates/synapsed-bluetooth` host capability. Exact controller, GATT protocol, units and stop/movement safety are prerequisites; invent none now. Specify actual notification bindings with that feature, not fake BLE calls today.  |
-| Mooltipass/security-login device | `drivers/<verified-model>/` if an exposed transport suffices; extend shared Rust BLE/HID/SDK bindings only where required. Verify actual model, SDK and supported transport when hardware arrives; BLE support is not established. No credential extraction/login APIs in this milestone. |
-| USB topology and system metrics  | Future shared Rust read-only OS capabilities, with deployed Lua drivers declaring topology/metric characteristics through the same registry. No built-in system device publisher or arbitrary USB-write grant.                                                                            |
-| Omarchy status bar               | `integrations/omarchy`: Waybar configuration using a later `synapsectl waybar` JSON/subscription command. The server remains a user systemd service; do not build another daemon or a generic “Omarchy plugin host”.                                                                      |
-| Agents                           | `integrations/agents`: skills invoking the CLI, and a later stdio `synapsectl mcp` adapter. No separate privileged agent API or agent-hosted daemon.                                                                                                                                      |
-| Home Assistant                   | Next phase: `integrations/home-assistant` consumes the same device/characteristic API after authenticated network publication/discovery is implemented. Do not implement a HAP bridge, MQTT broker adapter or HA package in the local phase.                                              |
-| LAN node discovery/communication | Next phase: opt-in authenticated network API plus non-secret mDNS advertisements. Current server must reject non-loopback binds; discovery never grants trust. No node replication/federation or certificate management in this phase.                                                    |
+| Requested subsequent area        | Reserved implementation location and boundary                                                                                                                                                                                                                                                                       |
+| -------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Desk height over BLE             | `drivers/<verified-desk-model>/` atop a future shared `crates/synapsed-bluetooth` host capability. Exact controller, GATT protocol, units and stop/movement safety are prerequisites; invent none now. Specify actual notification bindings with that feature, not fake BLE calls today.                            |
+| Mooltipass/security-login device | `drivers/<verified-model>/` if an exposed transport suffices; extend shared Rust BLE/HID/SDK bindings only where required. Verify actual model, SDK and supported transport when hardware arrives; BLE support is not established. No credential extraction/login APIs in this milestone.                           |
+| System metrics                   | Future shared Rust read-only OS capabilities with deployed Lua drivers declaring topology/metric characteristics through the same registry. USB/Thunderbolt/Bluetooth/DDC topology is already exposed by the separate read-only inventory; no built-in system-metric device publisher or arbitrary USB-write grant. |
+| Agents                           | `integrations/agents`: skills invoking the CLI, and a later stdio `synapsectl mcp` adapter. No separate privileged agent API or agent-hosted daemon.                                                                                                                                                                |
+| Home Assistant                   | Next phase: `integrations/home-assistant` consumes the same device/characteristic API after authenticated network publication/discovery is implemented. Do not implement a HAP bridge, MQTT broker adapter or HA package in the local phase.                                                                        |
+| LAN node discovery/communication | Next phase: opt-in authenticated network API plus non-secret mDNS advertisements. Current server must reject non-loopback binds; discovery never grants trust. No node replication/federation or certificate management in this phase.                                                                              |
 
 ## Evidence boundary
 

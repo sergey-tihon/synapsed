@@ -1,0 +1,11 @@
+[
+  "Snapshot",
+  "StatusResponse",
+  "DeviceResponse",
+  "LogsResponse",
+  "Characteristic",
+  "CharacteristicCommand",
+  "ServerEvent",
+  "ErrorResponse",
+  "InventoryResponse"
+]

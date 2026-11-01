@@ -2,21 +2,31 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "definitions": {
     "LogEntry": {
+      "description": "A recent daemon log entry with a stable sequence identifier.",
       "properties": {
         "id": {
+          "description": "Canonical unsigned decimal sequence identifier.",
           "pattern": "^(0|[1-9][0-9]*)$",
           "type": "string"
         },
         "level": {
-          "$ref": "#/definitions/LogLevel"
+          "allOf": [
+            {
+              "$ref": "#/definitions/LogLevel"
+            }
+          ],
+          "description": "Severity of the log entry."
         },
         "message": {
+          "description": "Bounded log message text.",
           "type": "string"
         },
         "target": {
+          "description": "Component or subsystem that emitted the entry.",
           "type": "string"
         },
         "timestamp": {
+          "description": "UTC RFC 3339 timestamp.",
           "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]+)?(Z|\\+00:00)$",
           "type": "string"
         }
@@ -31,26 +41,46 @@
       "type": "object"
     },
     "LogLevel": {
-      "enum": [
-        "debug",
-        "info",
-        "warn",
-        "error"
-      ],
-      "type": "string"
+      "description": "Severity level for a log entry.",
+      "oneOf": [
+        {
+          "const": "debug",
+          "description": "Diagnostic details useful during development.",
+          "type": "string"
+        },
+        {
+          "const": "info",
+          "description": "Informational event.",
+          "type": "string"
+        },
+        {
+          "const": "warn",
+          "description": "Warning that may require attention.",
+          "type": "string"
+        },
+        {
+          "const": "error",
+          "description": "Error event.",
+          "type": "string"
+        }
+      ]
     },
     "NodeInfo": {
+      "description": "Identifiers and display name for the daemon node and its running instance.",
       "properties": {
         "instanceId": {
+          "description": "Identifier for this daemon instance, encoded as canonical lowercase UUID-v4.",
           "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
           "type": "string"
         },
         "name": {
+          "description": "User-facing node name.",
           "maxLength": 128,
           "minLength": 1,
           "type": "string"
         },
         "nodeId": {
+          "description": "Stable identifier for this node, encoded as canonical lowercase UUID-v4.",
           "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
           "type": "string"
         }
@@ -63,8 +93,10 @@
       "type": "object"
     }
   },
+  "description": "A batch of recent log entries associated with a node.",
   "properties": {
     "entries": {
+      "description": "Recent log entries, in sequence order.",
       "items": {
         "$ref": "#/definitions/LogEntry"
       },
@@ -72,7 +104,12 @@
       "type": "array"
     },
     "node": {
-      "$ref": "#/definitions/NodeInfo"
+      "allOf": [
+        {
+          "$ref": "#/definitions/NodeInfo"
+        }
+      ],
+      "description": "Identity and display name of the node."
     }
   },
   "required": [

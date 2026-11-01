@@ -1,6 +1,6 @@
 import { spawn, execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { cp, copyFile, mkdir, mkdtemp, readFile, readdir, rm, chmod } from "node:fs/promises";
+import { cp, copyFile, mkdir, mkdtemp, readFile, readdir, rm, chmod, writeFile } from "node:fs/promises";
 import { createReadStream } from "node:fs";
 import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
@@ -34,17 +34,22 @@ function requireMacos() {
 async function target() {
   const { stdout } = await execute("rustc", ["-vV"], { cwd: root, env });
   const host = stdout.match(/^host: (.+)$/m)?.[1];
-  if (
-    !host ||
-    (macos && host !== "aarch64-apple-darwin") ||
-    (!macos && !["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu"].includes(host))
-  ) {
+  if (!host || (macos && host !== "aarch64-apple-darwin") || (!macos && host !== "x86_64-unknown-linux-gnu")) {
     throw new Error("Build on a supported native Rust host target.");
   }
   return host;
 }
 async function cargo(args) {
-  await run("cargo", [...args, "--target", await target(), "--locked"]);
+  const separator = args.indexOf("--");
+  const cargoArgs = separator < 0 ? args : args.slice(0, separator);
+  const rustcArgs = separator < 0 ? [] : args.slice(separator + 1);
+  await run("cargo", [
+    ...cargoArgs,
+    "--target",
+    await target(),
+    "--locked",
+    ...(separator < 0 ? [] : ["--", ...rustcArgs]),
+  ]);
 }
 async function portable() {
   await npm("@synapsed/client", "build");
@@ -53,8 +58,8 @@ async function portable() {
 }
 async function build() {
   await portable();
+  await npm("@synapsed/streamdeck", "build");
   if (macos) {
-    await npm("@synapsed/streamdeck", "build");
     await ray("build");
     await cargo(["build", "-p", "synapsed-macos-tray"]);
   }
@@ -67,7 +72,16 @@ async function versions(tag) {
     throw new Error("Tag, four-part manifest and three-part npm versions must match.");
   }
   const cargoSource = await readFile(join(root, "Cargo.toml"), "utf8");
-  if (!cargoSource.includes(`version = "${pkg.version}"`)) throw new Error("Rust workspace version must match npm.");
+  const workspacePackage = cargoSource.split(/^\[workspace\.package\]\s*$/m)[1]?.split(/^\[/m)[0];
+  if (workspacePackage?.match(/^version\s*=\s*"([^"]+)"/m)?.[1] !== pkg.version)
+    throw new Error("Rust workspace version must match npm.");
+  const plist = await readFile(join(root, "apps/macos-tray/Info.plist"), "utf8");
+  const plistVersion = plist.match(/<key>CFBundleShortVersionString<\/key>\s*<string>([^<]+)<\/string>/)?.[1];
+  const buildVersion = plist.match(/<key>CFBundleVersion<\/key>\s*<string>([^<]+)<\/string>/)?.[1];
+  if (plistVersion !== pkg.version || buildVersion !== pkg.version)
+    throw new Error("macOS tray plist versions must match npm.");
+  const omarchy = JSON.parse(await readFile(join(root, "apps/omarchy/manifest.json"), "utf8"));
+  if (omarchy.version !== pkg.version) throw new Error("Omarchy plugin manifest version must match npm.");
   return version;
 }
 async function binaryDirectory(profile) {
@@ -81,8 +95,7 @@ async function binaryDirectory(profile) {
 async function checksum(path) {
   const hash = createHash("sha256");
   for await (const chunk of createReadStream(path)) hash.update(chunk);
-  const { writeFile } = await import("node:fs/promises");
-  await writeFile(`${path}.sha256`, `${hash.digest("hex")}  ${path.slice(path.lastIndexOf("/") + 1)}\n`);
+  await writeFile(`${path}.sha256`, `${hash.digest("hex")}  ${basename(path)}\n`);
   console.log(relative(root, path));
 }
 async function archive(staging, filename) {
@@ -106,6 +119,12 @@ async function daemonArchive(version) {
     for (const name of ["generic-ddc", "benq-rd280u"])
       await cp(join(root, "drivers", name), join(staging, "drivers", name), { recursive: true });
     for (const name of ["deploy", "docs"]) await cp(join(root, name), join(staging, name), { recursive: true });
+    if (!macos) {
+      await cp(join(root, "apps/omarchy"), join(staging, "omarchy"), {
+        recursive: true,
+        filter: (source) => !source.includes(join(root, "apps", "omarchy", "tests")),
+      });
+    }
     for (const name of ["README.md", "CONTRIBUTE.md", "LICENSE-MIT", "LICENSE-APACHE", "THIRD-PARTY-NOTICES.txt"])
       await copyFile(join(root, name), join(staging, name));
     await archive(staging, `Synapsed-${version}-${await target()}.tar.gz`);
@@ -157,6 +176,14 @@ async function trayArchive(version) {
     await copyFile(join(await binaryDirectory("release"), "synapsed-macos-tray"), binary);
     await chmod(binary, 0o755);
     await copyFile(join(root, "apps/macos-tray/Info.plist"), join(contents, "Info.plist"));
+    await mkdir(join(contents, "Resources"), { recursive: true });
+    await run("iconutil", [
+      "-c",
+      "icns",
+      join(root, "apps/macos-tray/AppIcon.iconset"),
+      "-o",
+      join(contents, "Resources/AppIcon.icns"),
+    ]);
     for (const name of ["LICENSE-MIT", "LICENSE-APACHE", "THIRD-PARTY-NOTICES.txt"])
       await copyFile(join(root, name), join(staging, name));
     await archive(staging, `Synapsed-${version}-macos-arm64-tray.tar.gz`);
@@ -183,11 +210,32 @@ try {
       requireMacos();
       await cargo(["build", "-p", "synapsed-macos-tray"]);
       break;
+    case "lint":
+      // Clippy compiles the web-ui feature, which embeds the built dashboard.
+      await npm("@synapsed/client", "build");
+      await npm("@synapsed/web", "build");
+      await cargo([
+        "clippy",
+        "--workspace",
+        "--all-targets",
+        ...(!macos ? ["--exclude", "synapsed-macos-tray"] : []),
+        "--",
+        "-D",
+        "warnings",
+      ]);
+      await npm("@synapsed/streamdeck", "typecheck");
+      await npm("@synapsed/web", "typecheck");
+      break;
     case "test":
       await build();
       await run("npm", ["run", "api:check"]);
+      await run("npm", ["run", "brand:check"]);
+      await run("npm", ["run", "notices:check"]);
       await cargo(["test", "--workspace", "--all-features", ...(!macos ? ["--exclude", "synapsed-macos-tray"] : [])]);
       await npm("@synapsed/client", "test");
+      await npm("@synapsed/web", "test");
+      await npm("@synapsed/streamdeck", "test");
+      await run(process.execPath, ["--test", "apps/omarchy/tests/model.test.mjs"]);
       break;
     case "validate":
       requireMacos();

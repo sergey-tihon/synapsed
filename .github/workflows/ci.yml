@@ -1,14 +1,19 @@
 name: CI
 
 on:
+  # PR branches are verified by pull_request; push covers main only, so each
+  # PR commit runs once instead of once per event.
   push:
-    branches: ["**"]
+    branches: [main]
   pull_request:
   workflow_dispatch:
 
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 jobs:
   build:
     name: Verify (${{ matrix.target }})
@@ -20,8 +25,6 @@ jobs:
             target: aarch64-apple-darwin
           - runner: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
-          - runner: ubuntu-24.04-arm
-            target: aarch64-unknown-linux-gnu
     runs-on: ${{ matrix.runner }}
     env:
       MACOSX_DEPLOYMENT_TARGET: "12.0"
@@ -33,10 +36,12 @@ jobs:
           cache: npm
       - uses: dtolnay/rust-toolchain@1.90.0
         with:
-          components: rustfmt
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
       - run: npm ci
       - run: npm run audit
       - run: npm run format:check
+      - run: npm run lint
       - run: npm test
       - run: npm run validate
         if: runner.os == 'macOS'

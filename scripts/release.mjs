@@ -15,9 +15,7 @@ if (!/^v\d+\.\d+\.\d+\.0$/.test(tag ?? "")) throw new Error("A matching four-par
 const version = tag.slice(1);
 const directory = "release-assets";
 const artifacts = [
-  ...["aarch64-apple-darwin", "x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu"].map(
-    (target) => `Synapsed-${version}-${target}.tar.gz`,
-  ),
+  ...["aarch64-apple-darwin", "x86_64-unknown-linux-gnu"].map((target) => `Synapsed-${version}-${target}.tar.gz`),
   `Synapsed-${version}-macos-arm64.streamDeckPlugin`,
   `Synapsed-${version}-macos-arm64-tray.tar.gz`,
   `Synapsed-${version}-raycast.rayext`,
@@ -25,7 +23,9 @@ const artifacts = [
 const expected = new Set(artifacts.flatMap((name) => [name, `${name}.sha256`]));
 const actual = await readdir(directory);
 if (actual.length !== expected.size || actual.some((name) => !expected.has(name)))
-  throw new Error("Release assets must contain exactly all six native-target artifacts and their checksums.");
+  throw new Error(
+    `Release assets must contain exactly ${artifacts.length} native-target artifacts and their checksums.`,
+  );
 for (const name of artifacts) {
   const hash = createHash("sha256");
   for await (const chunk of createReadStream(join(directory, name))) hash.update(chunk);

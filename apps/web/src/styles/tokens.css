@@ -1,0 +1,46 @@
+:root {
+  color-scheme: light dark;
+  font-family:
+    system-ui,
+    -apple-system,
+    BlinkMacSystemFont,
+    "Segoe UI",
+    sans-serif;
+  --brand-violet: #8e86dc;
+  --brand-cyan: #6ce3e7;
+  --brand-ink: #11151c;
+  --brand-mist: #e6e9f5;
+  --brand-signal: light-dark(#5a4fc2, #6ce3e7);
+  --brand-gradient: linear-gradient(45deg, var(--brand-violet), var(--brand-cyan));
+  --page-bg: light-dark(#f5f7fc, var(--brand-ink));
+  --surface: light-dark(#ffffff, #171c25);
+  --surface-raised: light-dark(#f8faff, #1d2330);
+  --surface-selected: light-dark(#f0eefc, #262a42);
+  --text: light-dark(#172237, var(--brand-mist));
+  --muted: light-dark(#5c6a80, #a5b2c5);
+  --border: light-dark(#dce3ee, #343c4e);
+  --accent: light-dark(#5a4fc2, #aea7f2);
+  --accent-contrast: #ffffff;
+  --success: light-dark(#1c7659, #70d3ac);
+  --warning: light-dark(#926117, #f3cb71);
+  --error: light-dark(#a82e3b, #ffabb4);
+  --info: light-dark(#175c85, #86d4f4);
+  --shadow: 0 16px 42px color-mix(in srgb, var(--brand-ink) 10%, transparent);
+  --space-1: 0.25rem;
+  --space-2: 0.5rem;
+  --space-3: 0.75rem;
+  --space-4: 1rem;
+  --space-5: 1.5rem;
+  --space-6: 2rem;
+  --radius-sm: 0.45rem;
+  --radius-md: 0.8rem;
+  --radius-lg: 1.2rem;
+  --content-width: 1280px;
+  --body-size: 0.95rem;
+  --small-size: 0.82rem;
+  --heading-tight: 1.2;
+}
+
+* {
+  box-sizing: border-box;
+}

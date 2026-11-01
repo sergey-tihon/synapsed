@@ -52,13 +52,52 @@ fn strict_configuration_defaults_paths_and_missing_files() {
         "[plugins]\nprofile='benq'",
         "[monitor]\nprofile='benq'",
         "[plugins]\ndiscovery_interval_ms=999",
+        "[plugins]\ndiscovery_interval_ms=4294967296",
         "[plugins]\ndisabled=['generic-ddc','generic-ddc']",
         "[plugins]\ndirectory=''",
+        "[plugins]\ndirectory='~user/drivers'",
         "[server]\nallowed_origins=['*']",
         "[server]\nallowed_origins=['null']",
         "[server]\nallowed_origins=['http://untrusted.example']",
         "[server]\nallowed_origins=['http://127.1:3000']",
         "[plugins.settings.example]\nnumber=nan",
+        "[plugins.settings.example]\ndate=1979-05-27T07:32:00Z",
+        &format!("[plugins.settings.example]\n'{}'=1", "k".repeat(129)),
+        &format!(
+            "[plugins]\ndisabled=[{}]",
+            (0..17)
+                .map(|i| format!("'driver-{i}'"))
+                .collect::<Vec<_>>()
+                .join(",")
+        ),
+        &format!(
+            "[plugins.settings.{}]\nvalue=1",
+            (0..9)
+                .map(|i| format!("d{i}."))
+                .collect::<String>()
+                .trim_end_matches('.')
+        ),
+        &format!(
+            "[plugins.settings.example]\n{}",
+            (0..2049)
+                .map(|i| format!("k{i}=1"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        ),
+        &format!(
+            "[server]\nallowed_origins=[{}]",
+            (0..33)
+                .map(|i| format!("'http://localhost:{i}'"))
+                .collect::<Vec<_>>()
+                .join(",")
+        ),
+        &format!(
+            "[plugins.settings]\n{}",
+            (0..17)
+                .map(|i| format!("driver-{i}={{value=1}}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        ),
     ] {
         assert!(
             Config::from_text(source, &file, &paths).is_err(),
@@ -156,8 +195,8 @@ fn exact_host_origin_and_literal_loopback_policy() {
             ErrorCode::ForbiddenHost
         );
     }
-    headers.insert(header::HOST, "localhost:24816".parse().unwrap());
-    headers.insert(header::ORIGIN, "http://localhost:24816".parse().unwrap());
+    headers.insert(header::HOST, "LOCALHOST:24816".parse().unwrap());
+    headers.insert(header::ORIGIN, "http://LOCALHOST:24816".parse().unwrap());
     assert!(policy.check(&headers).is_ok());
     assert!(AccessPolicy::new("0.0.0.0:24816".parse().unwrap(), vec![]).is_err());
     for origin in [
@@ -170,6 +209,7 @@ fn exact_host_origin_and_literal_loopback_policy() {
     ] {
         assert!(validate_origin(origin).is_err());
     }
+    assert!(validate_origin("http://LOCALHOST:3000").is_ok());
 }
 #[tokio::test]
 async fn http_and_websocket_policy_precedes_upgrade() {
@@ -287,7 +327,7 @@ async fn commands_are_bounded_and_unknown_fields_are_sanitized() {
             .status(),
         422
     );
-    assert!(fixture.hardware.lock().unwrap().writes.is_empty());
+    assert!(fixture.hardware.lock().unwrap().set_calls.is_empty());
     fixture.server.shutdown().await.unwrap();
 }
 #[tokio::test]
@@ -417,26 +457,17 @@ async fn oversized_websocket_frames_do_not_enter_the_router() {
 
 #[tokio::test]
 async fn heartbeat_closes_after_the_next_missed_pong() {
-    let mut fixture = common::start(&[]).await;
+    let mut fixture = common::start_with_heartbeat(&[], Duration::from_millis(100)).await;
     let (mut socket, _) = connect_async(fixture.websocket()).await.unwrap();
     socket.next().await.unwrap().unwrap();
     socket.next().await.unwrap().unwrap();
-    // Read the first ping with virtual time resumed so the actual socket send
-    // completes before advancing to the missed-pong deadline. Tungstenite
-    // queues a pong on read, but cannot transmit it until the next poll/flush.
-    tokio::time::pause();
-    tokio::time::advance(Duration::from_secs(30)).await;
-    tokio::time::resume();
-    let first = tokio::time::timeout(Duration::from_secs(5), socket.next())
+    let first = tokio::time::timeout(Duration::from_secs(2), socket.next())
         .await
         .unwrap()
         .unwrap()
         .unwrap();
     assert!(matches!(first, Message::Ping(_)));
-    tokio::time::pause();
-    tokio::time::advance(Duration::from_secs(30)).await;
-    tokio::task::yield_now().await;
-    tokio::time::resume();
+    tokio::time::sleep(Duration::from_millis(150)).await;
     let second = tokio::time::timeout(Duration::from_secs(5), socket.next())
         .await
         .unwrap()
@@ -446,5 +477,59 @@ async fn heartbeat_closes_after_the_next_missed_pong() {
         panic!("missed next pong must close the connection")
     };
     assert_eq!(u16::from(frame.code), 1001);
+    fixture.server.shutdown().await.unwrap();
+}
+
+#[test]
+fn config_paths_use_injected_environment() {
+    let values = std::collections::BTreeMap::from([
+        ("HOME".to_owned(), std::ffi::OsString::from("/home/test")),
+        (
+            "XDG_CONFIG_HOME".to_owned(),
+            std::ffi::OsString::from("/config"),
+        ),
+        (
+            "XDG_DATA_HOME".to_owned(),
+            std::ffi::OsString::from("relative"),
+        ),
+        (
+            "XDG_STATE_HOME".to_owned(),
+            std::ffi::OsString::from("/state"),
+        ),
+    ]);
+    let paths = ConfigPaths::from_environment(|key| values.get(key).cloned()).unwrap();
+    assert_eq!(paths.home, std::path::PathBuf::from("/home/test"));
+    assert_eq!(paths.config_home, std::path::PathBuf::from("/config"));
+    assert_eq!(
+        paths.data_home,
+        std::path::PathBuf::from("/home/test/.local/share")
+    );
+    assert_eq!(paths.state_home, std::path::PathBuf::from("/state"));
+}
+
+#[tokio::test]
+async fn plugin_runtime_warning_text_reaches_http_logs() {
+    let mut fixture = common::start(&[]).await;
+    let dispatch = fixture.logs.tracing_dispatch();
+    tracing::dispatcher::with_default(&dispatch, || {
+        tracing::warn!(
+            target: "synapsed::plugins",
+            public_message = %"Lua runtime warning from ctx.log."
+        );
+    });
+    let logs: synapsed_api::LogsResponse = fixture
+        .http
+        .get(format!("{}/api/v1/logs", fixture.base()))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(logs.entries.iter().any(|entry| {
+        entry.target == "synapsed::plugins" && entry.message == "Lua runtime warning from ctx.log."
+    }));
     fixture.server.shutdown().await.unwrap();
 }

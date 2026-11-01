@@ -7,6 +7,7 @@ import type {
   ServerEvent,
   Snapshot,
   StatusResponse,
+  InventoryResponse,
 } from "./generated/index.js";
 import {
   ProtocolValidationError,
@@ -17,6 +18,7 @@ import {
   validateServerEvent,
   validateSnapshot,
   validateStatusResponse,
+  validateInventoryResponse,
 } from "./generated/index.js";
 
 export type ClientStatus = "connecting" | "connected" | "disconnected" | "incompatible";
@@ -25,8 +27,8 @@ export interface RequestOptions {
 }
 export interface SubscriptionCallbacks {
   onSnapshot(snapshot: Snapshot): void;
-  onLogs(entries: LogEntry[]): void;
-  onLog(entry: LogEntry): void;
+  onLogs?(entries: LogEntry[]): void;
+  onLog?(entry: LogEntry): void;
   /** Non-connected status explicitly marks retained snapshots/logs stale. */
   onStatus(status: ClientStatus): void;
   onError(error: Error): void;
@@ -35,6 +37,7 @@ export interface SynapsedClient {
   getStatus(options?: RequestOptions): Promise<StatusResponse>;
   getSnapshot(options?: RequestOptions): Promise<Snapshot>;
   getDevice(deviceId: string, options?: RequestOptions): Promise<DeviceResponse>;
+  getInventory(options?: RequestOptions): Promise<InventoryResponse>;
   execute(
     deviceId: string,
     characteristicId: string,
@@ -63,7 +66,7 @@ export class ApiRequestError extends Error {
 }
 export class RequestTimeoutError extends Error {
   constructor() {
-    super("The Synapsed request timed out after five seconds.");
+    super(`The Synapsed request timed out after ${TIMEOUT_MS / 1_000} seconds.`);
     this.name = "RequestTimeoutError";
   }
 }
@@ -123,7 +126,7 @@ interface SocketSession {
   socket: WebSocket;
   generation: number;
   instance: string | null;
-  initialTimer: number | undefined;
+  initialTimer: ReturnType<typeof setTimeout> | undefined;
   dispose(): void;
 }
 
@@ -140,7 +143,7 @@ class NativeClient implements SynapsedClient {
   private hasLogs = false;
   private status: ClientStatus = "disconnected";
   private session: SocketSession | null = null;
-  private reconnectTimer: number | undefined;
+  private reconnectTimer: ReturnType<typeof setTimeout> | undefined;
   private reconnectAttempt = 0;
   private terminalError: Error | null = null;
   private closed = false;
@@ -152,6 +155,7 @@ class NativeClient implements SynapsedClient {
   getStatus(options?: RequestOptions): Promise<StatusResponse> {
     return this.request(
       "/api/v1/status",
+      "StatusResponse",
       (data) => {
         const result = validateStatusResponse(data);
         this.acceptHttpInstance(result.node.instanceId);
@@ -161,11 +165,17 @@ class NativeClient implements SynapsedClient {
     );
   }
   getSnapshot(options?: RequestOptions): Promise<Snapshot> {
-    return this.request("/api/v1/devices", (data) => this.acceptHttpSnapshot(validateSnapshot(data)), options);
+    return this.request(
+      "/api/v1/devices",
+      "Snapshot",
+      (data) => this.acceptHttpSnapshot(validateSnapshot(data)),
+      options,
+    );
   }
   getDevice(deviceId: string, options?: RequestOptions): Promise<DeviceResponse> {
     return this.request(
       `/api/v1/devices/${encodeURIComponent(deviceId)}`,
+      "DeviceResponse",
       (data) => {
         const result = validateDeviceResponse(data);
         this.acceptHttpInstance(result.node.instanceId);
@@ -189,6 +199,7 @@ class NativeClient implements SynapsedClient {
     validateCharacteristicCommand(command);
     return this.request(
       `/api/v1/devices/${encodeURIComponent(deviceId)}/characteristics/${encodeURIComponent(characteristicId)}`,
+      "Snapshot",
       (data) => this.acceptHttpSnapshot(validateSnapshot(data)),
       options,
       command,
@@ -197,10 +208,23 @@ class NativeClient implements SynapsedClient {
   getLogs(options?: RequestOptions): Promise<LogsResponse> {
     return this.request(
       "/api/v1/logs",
+      "LogsResponse",
       (data) => {
         const result = validateLogsResponse(data);
         this.acceptHttpInstance(result.node.instanceId);
         // HTTP is a read result, not a stream ring replacement: do not erase newer live logs.
+        return result;
+      },
+      options,
+    );
+  }
+  getInventory(options?: RequestOptions): Promise<InventoryResponse> {
+    return this.request(
+      "/api/v1/inventory",
+      "InventoryResponse",
+      (data) => {
+        const result = validateInventoryResponse(data);
+        this.acceptHttpInstance(result.instanceId);
         return result;
       },
       options,
@@ -214,7 +238,7 @@ class NativeClient implements SynapsedClient {
     if (!this.session && !this.reconnectTimer && !this.terminalError) this.connect();
     else callbacks.onStatus(this.status);
     if (this.subscribers.has(id) && this.snapshot) callbacks.onSnapshot(this.snapshot);
-    if (this.subscribers.has(id) && this.hasLogs) callbacks.onLogs([...this.logs]);
+    if (this.subscribers.has(id) && this.hasLogs) callbacks.onLogs?.([...this.logs]);
     if (this.subscribers.has(id) && this.terminalError) callbacks.onError(this.terminalError);
     let subscribed = true;
     return () => {
@@ -260,6 +284,7 @@ class NativeClient implements SynapsedClient {
 
   private async request<T>(
     path: string,
+    schemaName: "Snapshot" | "StatusResponse" | "DeviceResponse" | "LogsResponse" | "InventoryResponse",
     validate: (value: unknown) => T,
     options?: RequestOptions,
     command?: CharacteristicCommand,
@@ -272,7 +297,7 @@ class NativeClient implements SynapsedClient {
     const onAbort = () => controller.abort(options?.signal?.reason ?? abortError());
     options?.signal?.addEventListener("abort", onAbort, { once: true });
     let timedOut = false;
-    const timeout = setTimeout(() => {
+    const timeout: ReturnType<typeof setTimeout> = setTimeout(() => {
       timedOut = true;
       controller.abort();
     }, TIMEOUT_MS);
@@ -295,17 +320,7 @@ class NativeClient implements SynapsedClient {
         if (controller.signal.aborted) throw error;
         if (this.closed) throw closedError();
         if (generation !== this.generation) throw new StaleResponseError();
-        throw new ProtocolValidationError(
-          !response.ok
-            ? "ErrorResponse"
-            : command || path === "/api/v1/devices"
-              ? "Snapshot"
-              : path === "/api/v1/status"
-                ? "StatusResponse"
-                : path === "/api/v1/logs"
-                  ? "LogsResponse"
-                  : "DeviceResponse",
-        );
+        throw new ProtocolValidationError(!response.ok ? "ErrorResponse" : schemaName);
       }
       if (this.closed) throw closedError();
       if (generation !== this.generation) throw new StaleResponseError();
@@ -400,7 +415,7 @@ class NativeClient implements SynapsedClient {
       // Native WebSocket deliberately hides HTTP handshake status. An ordinary same-origin
       // read exposes a 403 policy envelope, without sending/retrying any command.
       if (this.closed || this.terminalError || this.subscribers.size === 0) return;
-      void this.request("/api/v1/status", validateStatusResponse).catch(() => {});
+      void this.request("/api/v1/status", "StatusResponse", validateStatusResponse).catch(() => {});
     };
     const onClose = (event: CloseEvent) => {
       if (!this.current(session)) return;
@@ -469,7 +484,7 @@ class NativeClient implements SynapsedClient {
       this.logs.push(event.entry);
       if (this.logs.length > LOG_LIMIT) this.logs.shift();
       this.hasLogs = true;
-      this.emit((callbacks) => callbacks.onLog(event.entry));
+      this.emit((callbacks) => callbacks.onLog?.(event.entry));
     }
   }
   private replaceLogs(entries: LogEntry[]): void {
@@ -478,7 +493,7 @@ class NativeClient implements SynapsedClient {
     this.logs = sorted.filter((entry, index) => index === 0 || entry.id !== sorted[index - 1]!.id).slice(-LOG_LIMIT);
     this.lastLogId = this.logs.at(-1)?.id ?? null;
     this.hasLogs = true;
-    this.emit((callbacks) => callbacks.onLogs([...this.logs]));
+    this.emit((callbacks) => callbacks.onLogs?.([...this.logs]));
   }
   private disconnect(session: SocketSession, error: Error): void {
     if (!this.current(session)) return;

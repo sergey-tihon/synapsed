@@ -4,7 +4,7 @@ One Devices view reads the local daemon's generated characteristic API. Its requ
 
 ## Development and packaging
 
-Use the repository's root `npm ci` and build `@synapsed/client` before invoking this extension's SDK scripts. The manifest's `author` must first be supplied with the user's genuine public Raycast account username; it is intentionally absent until that prerequisite is provided. SDK lint validates that account through Raycast's public API.
+The extension uses the Raycast account username already declared in its manifest. SDK lint validates that value through Raycast's public API.
 
 From the repository root:
 
@@ -18,7 +18,7 @@ npm run pack --workspace synapsed-raycast
 
 Import this source extension using Raycast's Import Extension command or run the SDK developer process with a running, signed-in Raycast app. Shared-client source changes require rebuilding the client and restarting the SDK developer process: Raycast does not watch sibling workspace output. This API version uses Raycast 2's Apple Silicon/macOS Tahoe host with native fetch/WebSocket; developer Node 24 is not native-host verification.
 
-The adapter runs the real production SDK export and typecheck, and full CI lint against the canonical root package lock via a temporary symlink. It never publishes. Packaging writes `dist/Synapsed-0.1.0.0-raycast.rayext` at the repository root; double-click installation of that artifact is not established.
+The adapter checks installed SDK and TypeScript versions against this extension's manifest and derives the bundle filename version from the root package manifest. It never publishes; installation behavior for the generated artifact is not established.
 
 ## Operation
 

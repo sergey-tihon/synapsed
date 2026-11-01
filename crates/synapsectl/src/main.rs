@@ -38,6 +38,7 @@ struct Arguments {
 #[derive(Subcommand)]
 enum Command {
     Status,
+    Inventory,
     Devices,
     Get {
         device: String,
@@ -129,11 +130,15 @@ async fn main() -> ExitCode {
         json: arguments.json,
     };
     let result = tokio::select! {
-        result = run(&client, &output, arguments.command) => result,
-        signal = tokio::signal::ctrl_c() => match signal {
-            Ok(()) => Ok(()),
-            Err(_) => Err(Failure::Client(ClientError::Network)),
-        },
+        result = run(&client, &output, arguments.command) => {
+            result
+        }
+        signal = tokio::signal::ctrl_c() => {
+            match signal {
+                Ok(()) => Ok(()),
+                Err(_) => Err(Failure::Client(ClientError::Network)),
+            }
+        }
     };
     client.close();
     match result {
@@ -148,6 +153,7 @@ async fn main() -> ExitCode {
 async fn run(client: &Client, output: &Output, command: Command) -> Result<(), Failure> {
     match command {
         Command::Status => output.status(&client.status().await?)?,
+        Command::Inventory => output.inventory(&client.inventory().await?)?,
         Command::Devices => output.snapshot(client.snapshot().await?.as_ref())?,
         Command::Get {
             device,
@@ -335,5 +341,10 @@ mod tests {
                 matches!(arguments.command, Command::Set { value: actual, .. } if actual == value)
             );
         }
+    }
+    #[test]
+    fn inventory_command_parses_without_arguments() {
+        let arguments = Arguments::try_parse_from(["synapsectl", "inventory"]).unwrap();
+        assert!(matches!(arguments.command, Command::Inventory));
     }
 }

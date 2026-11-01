@@ -5,15 +5,28 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
+[features]
+test-support = []
+
+[lints]
+workspace = true
+
 [dependencies]
+synapsed-inventory = { path = "../synapsed-inventory" }
 synapsed-core = { path = "../synapsed-core" }
 serde = { workspace = true }
 tokio = { workspace = true }
-sha2 = "0.10"
-libc = "0.2"
+sha2.workspace = true
+libc.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
 i2cdev = "=0.6.2"
 
 [dev-dependencies]
+
 serde_json = { workspace = true }
+
+[[test]]
+name = "protocol_fixtures"
+path = "tests/protocol_fixtures.rs"
+required-features = ["test-support"]

@@ -1,4 +1,4 @@
-import { defineConfig } from "vite";
+import { defineConfig } from "vitest/config";
 import solid from "@solidjs/vite-plugin";
 
 export default defineConfig({
@@ -11,4 +11,5 @@ export default defineConfig({
       "/api": { target: "http://127.0.0.1:24816", ws: true, changeOrigin: true },
     },
   },
+  test: { environment: "jsdom" },
 });

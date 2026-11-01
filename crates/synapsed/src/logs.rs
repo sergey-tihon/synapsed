@@ -19,7 +19,7 @@ pub struct LogRing {
 }
 struct Inner {
     state: Mutex<RingState>,
-    events: broadcast::Sender<LogEntry>,
+    events: broadcast::Sender<(u64, LogEntry)>,
     stderr: bool,
 }
 struct RingState {
@@ -50,8 +50,25 @@ impl LogRing {
             .cloned()
             .collect()
     }
-    pub fn subscribe(&self) -> broadcast::Receiver<LogEntry> {
+    pub fn subscribe(&self) -> broadcast::Receiver<(u64, LogEntry)> {
         self.inner.events.subscribe()
+    }
+    pub fn recent_with_sequence(&self) -> Vec<(u64, LogEntry)> {
+        let state = self.inner.state.lock().expect("log mutex poisoned");
+        let first = state
+            .next
+            .saturating_sub(u64::try_from(state.entries.len()).unwrap_or(u64::MAX));
+        state
+            .entries
+            .iter()
+            .enumerate()
+            .map(|(index, entry)| {
+                (
+                    first + u64::try_from(index).unwrap_or(u64::MAX),
+                    entry.clone(),
+                )
+            })
+            .collect()
     }
     /// Callers supply a static public description; settings, requests and native errors are not messages.
     pub fn record(&self, level: LogLevel, target: &str, message: &'static str) {
@@ -65,34 +82,38 @@ impl LogRing {
         );
     }
     fn append(&self, level: LogLevel, target: &str, message: &str) {
-        let mut state = self.inner.state.lock().expect("log mutex poisoned");
-        let Some(next) = state.next.checked_add(1) else {
-            return;
+        let entry = {
+            let mut state = self.inner.state.lock().expect("log mutex poisoned");
+            let Some(next) = state.next.checked_add(1) else {
+                return;
+            };
+            let sequence = state.next;
+            let entry = LogEntry {
+                id: sequence.to_string(),
+                timestamp: Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
+                level,
+                target: target
+                    .chars()
+                    .filter(|character| {
+                        character.is_ascii_alphanumeric()
+                            || matches!(character, '_' | '-' | '.' | ':')
+                    })
+                    .take(128)
+                    .collect(),
+                message: message
+                    .chars()
+                    .filter(|character| !character.is_control())
+                    .take(256)
+                    .collect(),
+            };
+            state.next = next;
+            if state.entries.len() == MAX_LOG_ENTRIES {
+                state.entries.pop_front();
+            }
+            state.entries.push_back(entry.clone());
+            let _ = self.inner.events.send((sequence, entry.clone()));
+            entry
         };
-        let entry = LogEntry {
-            id: state.next.to_string(),
-            timestamp: Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
-            level,
-            target: target
-                .chars()
-                .filter(|character| {
-                    character.is_ascii_alphanumeric() || matches!(character, '_' | '-' | '.' | ':')
-                })
-                .take(128)
-                .collect(),
-            message: message
-                .chars()
-                .filter(|character| !character.is_control())
-                .take(256)
-                .collect(),
-        };
-        state.next = next;
-        if state.entries.len() == MAX_LOG_ENTRIES {
-            state.entries.pop_front();
-        }
-        state.entries.push_back(entry.clone());
-        // Keep insertion and broadcast under one lock so concurrent producers preserve sequence order.
-        let _ = self.inner.events.send(entry.clone());
         if self.inner.stderr {
             let _ = writeln!(
                 std::io::stderr().lock(),
@@ -121,8 +142,37 @@ struct PublicLogLayer(LogRing);
 struct PublicFields {
     message: Option<String>,
 }
+struct BoundedMessage {
+    value: String,
+    remaining: usize,
+}
+impl std::fmt::Write for BoundedMessage {
+    fn write_str(&mut self, input: &str) -> Result<(), std::fmt::Error> {
+        let mut end = 0;
+        let mut count = 0;
+        for (index, character) in input.char_indices() {
+            if count == self.remaining {
+                break;
+            }
+            end = index + character.len_utf8();
+            count += 1;
+        }
+        self.value.push_str(&input[..end]);
+        self.remaining -= count;
+        Ok(())
+    }
+}
 impl Visit for PublicFields {
-    fn record_debug(&mut self, _: &Field, _: &dyn std::fmt::Debug) {}
+    fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+        if field.name() == "public_message" {
+            let mut message = BoundedMessage {
+                value: String::with_capacity(256),
+                remaining: 256,
+            };
+            let _ = std::fmt::write(&mut message, format_args!("{value:?}"));
+            self.message = Some(message.value);
+        }
+    }
     fn record_str(&mut self, field: &Field, value: &str) {
         if field.name() == "public_message" {
             self.message = Some(value.chars().take(256).collect());

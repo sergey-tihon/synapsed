@@ -146,6 +146,11 @@ try {
   const client = createClient({ baseUrl: endpoint });
   try {
     assert.equal((await firstSubscriptionSnapshot(client)).node.instanceId, first.node.instanceId);
+    const inventory = await client.getInventory();
+    assert.ok(inventory.nodes.some((node) => node.kind === "host"));
+    assert.equal(inventory.sources.find((source) => source.kind === "ddc")?.state, "not_scanned");
+    const cliInventory = JSON.parse((await cli("--json", "inventory")).stdout);
+    assert.ok(cliInventory.nodes.some((node) => node.kind === "host"));
   } finally {
     client.close();
   }
@@ -200,6 +205,7 @@ try {
       disabledDrivers: 2,
       originHostDenied: true,
       obsoleteConfigRejected: true,
+      inventory: true,
     }),
   );
 } finally {

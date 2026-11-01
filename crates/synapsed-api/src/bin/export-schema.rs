@@ -8,10 +8,15 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
     let output = PathBuf::from(output);
     fs::create_dir_all(&output)?;
-    for (name, schema) in synapsed_api::schema::roots() {
+    let roots = synapsed_api::schema::roots();
+    let names: Vec<_> = roots.iter().map(|(name, _)| *name).collect();
+    for (name, schema) in roots {
         let mut bytes = serde_json::to_vec_pretty(&schema)?;
         bytes.push(b'\n');
         fs::write(output.join(format!("{name}.json")), bytes)?;
     }
+    let mut bytes = serde_json::to_vec_pretty(&names)?;
+    bytes.push(b'\n');
+    fs::write(output.join("roots.json"), bytes)?;
     Ok(())
 }

@@ -2,11 +2,18 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "definitions": {
     "ApiError": {
+      "description": "An API error with a bounded, user-safe message.",
       "properties": {
         "code": {
-          "$ref": "#/definitions/ErrorCode"
+          "allOf": [
+            {
+              "$ref": "#/definitions/ErrorCode"
+            }
+          ],
+          "description": "Category identifying the kind of failure."
         },
         "message": {
+          "description": "Bounded human-readable description of the failure.",
           "maxLength": 256,
           "type": "string"
         }
@@ -18,14 +25,18 @@
       "type": "object"
     },
     "CharacteristicAccess": {
+      "description": "Read, write, and notification permissions for a characteristic.",
       "properties": {
         "notify": {
+          "description": "Updates may be pushed without polling.",
           "type": "boolean"
         },
         "read": {
+          "description": "The current value may be observed.",
           "type": "boolean"
         },
         "write": {
+          "description": "A command may change the characteristic.",
           "type": "boolean"
         }
       },
@@ -37,10 +48,13 @@
       "type": "object"
     },
     "CharacteristicSpec": {
+      "description": "Metadata describing the shape and constraints of a characteristic value.",
       "oneOf": [
         {
+          "description": "Numeric value with optional bounds, step, integer restriction, and unit.",
           "properties": {
             "integer": {
+              "description": "Whether values must be integral.",
               "type": "boolean"
             },
             "kind": {
@@ -48,24 +62,28 @@
               "type": "string"
             },
             "maximum": {
+              "description": "Inclusive maximum value, when specified.",
               "type": [
                 "number",
                 "null"
               ]
             },
             "minimum": {
+              "description": "Inclusive minimum value, when specified.",
               "type": [
                 "number",
                 "null"
               ]
             },
             "step": {
+              "description": "Positive increment supported by step commands, when specified.",
               "type": [
                 "number",
                 "null"
               ]
             },
             "unit": {
+              "description": "Optional unit label.",
               "maxLength": 32,
               "type": [
                 "string",
@@ -84,6 +102,7 @@
           "type": "object"
         },
         {
+          "description": "Boolean value.",
           "properties": {
             "kind": {
               "const": "boolean",
@@ -96,12 +115,14 @@
           "type": "object"
         },
         {
+          "description": "One value selected from a bounded set of options.",
           "properties": {
             "kind": {
               "const": "enum",
               "type": "string"
             },
             "options": {
+              "description": "Available enum values and their labels.",
               "items": {
                 "$ref": "#/definitions/EnumOption"
               },
@@ -117,12 +138,14 @@
           "type": "object"
         },
         {
+          "description": "Text value with a maximum character count.",
           "properties": {
             "kind": {
               "const": "string",
               "type": "string"
             },
             "maxLength": {
+              "description": "Maximum number of Unicode scalar values accepted.",
               "maximum": 1024,
               "minimum": 0,
               "type": "integer"
@@ -135,6 +158,7 @@
           "type": "object"
         },
         {
+          "description": "Write-only action without a stored value.",
           "properties": {
             "kind": {
               "const": "action",
@@ -149,35 +173,54 @@
       ]
     },
     "CharacteristicStatus": {
-      "enum": [
-        "ok",
-        "unavailable",
-        "error"
-      ],
-      "type": "string"
-    },
-    "CharacteristicValue": {
-      "anyOf": [
+      "description": "Availability state of a characteristic observation.",
+      "oneOf": [
         {
-          "type": "boolean"
+          "const": "ok",
+          "description": "The characteristic has a valid current observation.",
+          "type": "string"
         },
         {
-          "type": "number"
+          "const": "unavailable",
+          "description": "The characteristic is temporarily unavailable.",
+          "type": "string"
         },
         {
-          "maxLength": 1024,
+          "const": "error",
+          "description": "The characteristic operation or observation failed.",
           "type": "string"
         }
       ]
     },
+    "CharacteristicValue": {
+      "anyOf": [
+        {
+          "description": "Boolean characteristic value.",
+          "type": "boolean"
+        },
+        {
+          "description": "Finite numeric characteristic value.",
+          "type": "number"
+        },
+        {
+          "description": "Bounded text characteristic value.",
+          "maxLength": 1024,
+          "type": "string"
+        }
+      ],
+      "description": "JSON-compatible value of a characteristic observation or command."
+    },
     "EnumOption": {
+      "description": "A permitted value and its user-facing label for an enum characteristic.",
       "properties": {
         "label": {
+          "description": "User-facing label for the value.",
           "maxLength": 128,
           "minLength": 1,
           "type": "string"
         },
         "value": {
+          "description": "Serialized enum value.",
           "maxLength": 1024,
           "type": "string"
         }
@@ -189,30 +232,100 @@
       "type": "object"
     },
     "ErrorCode": {
-      "enum": [
-        "invalid_request",
-        "forbidden_origin",
-        "forbidden_host",
-        "unknown_device",
-        "unknown_characteristic",
-        "ambiguous_device",
-        "driver_conflict",
-        "unsupported_operation",
-        "invalid_value",
-        "permission_denied",
-        "device_unavailable",
-        "ddc_error",
-        "plugin_error",
-        "unsupported_capability",
-        "busy",
-        "timeout"
-      ],
-      "type": "string"
+      "description": "Machine-readable category describing an API error.",
+      "oneOf": [
+        {
+          "const": "invalid_request",
+          "description": "The request could not be parsed or otherwise violates the API contract.",
+          "type": "string"
+        },
+        {
+          "const": "forbidden_origin",
+          "description": "The request origin is not allowed.",
+          "type": "string"
+        },
+        {
+          "const": "forbidden_host",
+          "description": "The request host is not allowed.",
+          "type": "string"
+        },
+        {
+          "const": "unknown_device",
+          "description": "The requested device does not exist.",
+          "type": "string"
+        },
+        {
+          "const": "unknown_characteristic",
+          "description": "The requested characteristic does not exist.",
+          "type": "string"
+        },
+        {
+          "const": "ambiguous_device",
+          "description": "The request identifies more than one device.",
+          "type": "string"
+        },
+        {
+          "const": "driver_conflict",
+          "description": "The requested driver operation conflicts with current ownership.",
+          "type": "string"
+        },
+        {
+          "const": "unsupported_operation",
+          "description": "The requested operation is not supported.",
+          "type": "string"
+        },
+        {
+          "const": "invalid_value",
+          "description": "A supplied value is invalid.",
+          "type": "string"
+        },
+        {
+          "const": "permission_denied",
+          "description": "The operation is not permitted.",
+          "type": "string"
+        },
+        {
+          "const": "device_unavailable",
+          "description": "The requested device is unavailable.",
+          "type": "string"
+        },
+        {
+          "const": "ddc_error",
+          "description": "A DDC transport operation failed.",
+          "type": "string"
+        },
+        {
+          "const": "plugin_error",
+          "description": "A driver plugin operation failed.",
+          "type": "string"
+        },
+        {
+          "const": "unsupported_capability",
+          "description": "The requested capability is not supported.",
+          "type": "string"
+        },
+        {
+          "const": "busy",
+          "description": "The operation could not proceed because the service is busy.",
+          "type": "string"
+        },
+        {
+          "const": "timeout",
+          "description": "The operation exceeded its deadline.",
+          "type": "string"
+        }
+      ]
     }
   },
+  "description": "A characteristic declaration, access policy, and optional current observation.",
   "properties": {
     "access": {
-      "$ref": "#/definitions/CharacteristicAccess"
+      "allOf": [
+        {
+          "$ref": "#/definitions/CharacteristicAccess"
+        }
+      ],
+      "description": "Permissions granted for this characteristic."
     },
     "error": {
       "anyOf": [
@@ -222,22 +335,35 @@
         {
           "type": "null"
         }
-      ]
+      ],
+      "description": "Optional safe description of an error."
     },
     "id": {
+      "description": "Stable identifier within the device.",
       "pattern": "^[a-z][a-z0-9_.-]{0,63}$",
       "type": "string"
     },
     "label": {
+      "description": "User-facing characteristic label.",
       "maxLength": 128,
       "minLength": 1,
       "type": "string"
     },
     "spec": {
-      "$ref": "#/definitions/CharacteristicSpec"
+      "allOf": [
+        {
+          "$ref": "#/definitions/CharacteristicSpec"
+        }
+      ],
+      "description": "Value type and metadata constraints."
     },
     "status": {
-      "$ref": "#/definitions/CharacteristicStatus"
+      "allOf": [
+        {
+          "$ref": "#/definitions/CharacteristicStatus"
+        }
+      ],
+      "description": "Current availability of the characteristic."
     },
     "value": {
       "anyOf": [
@@ -247,7 +373,8 @@
         {
           "type": "null"
         }
-      ]
+      ],
+      "description": "Most recently observed value, when one is available."
     }
   },
   "required": [

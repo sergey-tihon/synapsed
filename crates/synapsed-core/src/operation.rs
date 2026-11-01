@@ -12,45 +12,76 @@ use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+/// Identifier and generation assigned to a native endpoint.
 pub struct EndpointToken {
+    /// Stable numeric identifier for the endpoint within the process.
     pub id: u64,
+    /// Generation distinguishing the endpoint's current presence and identity.
     pub generation: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
+/// Lifecycle state of an authorized native operation.
 pub enum OperationState {
+    /// The operation is waiting to begin.
     Queued,
+    /// The operation is executing before any write has been admitted.
     Running,
+    /// An irreversible native write has been admitted.
     WriteStarted,
+    /// All native work for the operation has completed.
     Completed,
+    /// The operation was cancelled before completion.
     Cancelled,
 }
 
+impl OperationState {
+    fn from_u8(value: u8) -> Self {
+        match value {
+            0 => Self::Queued,
+            1 => Self::Running,
+            2 => Self::WriteStarted,
+            3 => Self::Completed,
+            4 => Self::Cancelled,
+            _ => unreachable!("operation state is stored from the enum discriminant"),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
+/// Result evidence recorded for a native transport write.
 pub struct TransportOutcome {
+    /// Endpoint on which the operation was attempted.
     pub endpoint: EndpointToken,
+    /// VCP register code that was written.
     pub code: u8,
+    /// Value requested by the caller.
     pub requested: u16,
+    /// Observed current and maximum values after the write, when available.
     pub observed: Option<(u16, u16)>,
+    /// Error from the write, readback, or authorization check, if any.
     pub error: Option<DriverError>,
 }
 
 #[derive(Clone, Default)]
+/// Provides stable per-endpoint transaction gates for device ownership grants.
 pub struct EndpointGates {
     inner: Arc<Mutex<BTreeMap<u64, Arc<AsyncMutex<()>>>>>,
 }
 #[derive(Clone)]
+/// Active ownership grant restricting native operations to one device's endpoints.
 pub struct DeviceGrant {
-    pub owner: Arc<str>,
-    pub device: Arc<str>,
-    pub epoch: u64,
+    owner: Arc<str>,
+    device: Arc<str>,
+    epoch: u64,
     endpoints: Arc<[EndpointToken]>,
     active: Arc<AtomicBool>,
     gates: EndpointGates,
 }
 static SEQUENCE: AtomicU64 = AtomicU64::new(1);
 impl EndpointGates {
+    /// Create an active grant for one device and its uniquely identified endpoints.
     pub fn activate(
         &self,
         owner: impl Into<Arc<str>>,
@@ -76,15 +107,31 @@ impl EndpointGates {
     }
 }
 impl DeviceGrant {
+    /// Return the driver identifier that owns this grant.
+    pub fn owner(&self) -> &str {
+        &self.owner
+    }
+    /// Return the device identifier this grant protects.
+    pub fn device(&self) -> &str {
+        &self.device
+    }
+    /// Return the ownership epoch associated with this grant.
+    pub fn epoch(&self) -> u64 {
+        self.epoch
+    }
+    /// Revoke this grant so no new operations can be admitted.
     pub fn revoke(&self) {
         self.active.store(false, Ordering::SeqCst);
     }
+    /// Return whether this grant still permits new operations.
     pub fn is_active(&self) -> bool {
         self.active.load(Ordering::SeqCst)
     }
+    /// Return the endpoints covered by this grant.
     pub fn endpoints(&self) -> &[EndpointToken] {
         &self.endpoints
     }
+    /// Begin an operation holding this grant's endpoint gates until native work drains.
     pub async fn begin(
         &self,
         reads: BTreeSet<u8>,
@@ -175,6 +222,7 @@ impl DeviceGrant {
 }
 
 #[derive(Clone)]
+/// Authorization and lifecycle context shared by callbacks and native DDC work.
 pub struct OperationContext {
     inner: Arc<Operation>,
     write_allowed: bool,
@@ -199,6 +247,7 @@ struct Lease {
     native: usize,
     finished: bool,
 }
+/// Lease representing native work that retains an operation's endpoint gates.
 pub struct NativeWork {
     context: OperationContext,
 }
@@ -238,7 +287,7 @@ impl OperationContext {
             write_allowed: true,
         }
     }
-    /// Read-only discovery scopes have no claimed device or write permission.
+    /// Create a read-only discovery scope without a claimed device or write permission.
     pub fn discovery(
         owner: impl Into<Arc<str>>,
         endpoints: Vec<EndpointToken>,
@@ -257,37 +306,38 @@ impl OperationContext {
             vec![],
         )
     }
-    /// Share the transaction/evidence/gates without exposing its write grants.
+    /// Share the transaction, evidence, and gates through a view that cannot authorize writes.
     pub fn read_only(&self) -> Self {
         Self {
             inner: self.inner.clone(),
             write_allowed: false,
         }
     }
+    /// Return the driver identifier that owns this operation.
     pub fn owner(&self) -> &str {
         &self.inner.owner
     }
+    /// Return the device identifier protected by this operation.
     pub fn device(&self) -> &str {
         &self.inner.device
     }
+    /// Return the ownership epoch associated with this operation.
     pub fn epoch(&self) -> u64 {
         self.inner.epoch
     }
+    /// Return the unique sequence number assigned to this operation.
     pub fn sequence(&self) -> u64 {
         self.inner.sequence
     }
+    /// Return the absolute deadline for this operation.
     pub fn deadline(&self) -> Instant {
         self.inner.deadline
     }
+    /// Return the current lifecycle state of this operation.
     pub fn state(&self) -> OperationState {
-        match self.inner.state.load(Ordering::SeqCst) {
-            0 => OperationState::Queued,
-            1 => OperationState::Running,
-            2 => OperationState::WriteStarted,
-            3 => OperationState::Completed,
-            _ => OperationState::Cancelled,
-        }
+        OperationState::from_u8(self.inner.state.load(Ordering::SeqCst))
     }
+    /// Check endpoint, register, deadline, and read/write authorization.
     pub fn validate(
         &self,
         endpoint: EndpointToken,
@@ -319,6 +369,7 @@ impl OperationContext {
         }
         Ok(())
     }
+    /// Return the granted write-change mask for a register, if writes are allowed.
     pub fn change_mask(&self, code: u8) -> Option<u16> {
         if self.write_allowed {
             self.inner.writes.get(&code).copied()
@@ -326,6 +377,7 @@ impl OperationContext {
             None
         }
     }
+    /// Start authorized native work and retain its endpoint gates until it finishes.
     pub fn begin_native(
         &self,
         endpoint: EndpointToken,
@@ -386,7 +438,7 @@ impl OperationContext {
             }
         }
     }
-    /// A receiver disappearing may cancel admission, but cannot erase an admitted write.
+    /// Mark callback abandonment; admission may be cancelled, but admitted native writes complete.
     pub fn abandon(&self) -> bool {
         loop {
             let state = self.inner.state.load(Ordering::SeqCst);
@@ -409,7 +461,7 @@ impl OperationContext {
             }
         }
     }
-    /// Overall deadline/host revocation denies further work even after a first Set.
+    /// Cancel further work after a deadline or host revocation, including after a write starts.
     pub fn cancel(&self) {
         self.inner.abandoned.store(true, Ordering::SeqCst);
         loop {
@@ -432,7 +484,7 @@ impl OperationContext {
             }
         }
     }
-    /// Native work keeps gates until its recorded completion, even after callback abandonment.
+    /// Mark the callback finished; native work retains gates until its completion.
     pub fn finish(&self) {
         let mut lease = self.inner.lease.lock().expect("operation lease poisoned");
         lease.finished = true;
@@ -445,6 +497,7 @@ impl OperationContext {
             lease.guards.clear();
         }
     }
+    /// Record the observed result of a native transport write.
     pub fn record_outcome(&self, outcome: TransportOutcome) {
         self.inner
             .outcomes
@@ -452,6 +505,7 @@ impl OperationContext {
             .expect("operation outcomes poisoned")
             .push(outcome);
     }
+    /// Return all transport outcomes recorded by this operation.
     pub fn outcomes(&self) -> Vec<TransportOutcome> {
         self.inner
             .outcomes

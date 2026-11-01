@@ -7,9 +7,11 @@ import { constants } from "node:fs";
 
 const cwd = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const require = createRequire(resolve(cwd, "package.json"));
+const rootPackage = JSON.parse(await readFile(resolve(cwd, "../../package.json"), "utf8"));
+const extensionPackage = JSON.parse(await readFile(resolve(cwd, "package.json"), "utf8"));
 const commands = {
   build: ["build", "-e", "dist", "-o", "dist"],
-  bundle: ["bundle", "-o", "../../dist/Synapsed-0.1.0.0-raycast.rayext"],
+  bundle: ["bundle", "-o", `../../dist/Synapsed-${rootPackage.version}.0-raycast.rayext`],
   lint: ["lint"],
   develop: ["develop"],
 };
@@ -19,7 +21,8 @@ if (process.argv.length !== 3 || !Object.hasOwn(commands, command)) {
 }
 const typescriptPackage = require.resolve("typescript/package.json");
 const typescript = JSON.parse(await readFile(typescriptPackage, "utf8"));
-if (typescript.version !== "5.9.3") throw new Error("Raycast requires pinned TypeScript 5.9.3");
+if (typescript.version !== extensionPackage.devDependencies.typescript)
+  throw new Error("Installed TypeScript does not match the Raycast manifest");
 const binDirectory = resolve(cwd, "node_modules/.bin");
 const tsc = resolve(binDirectory, "tsc");
 async function exists(path) {
@@ -37,7 +40,8 @@ if (!(await exists(tsc))) {
 }
 const sdkPackage = require.resolve("@raycast/api/package.json");
 const sdk = JSON.parse(await readFile(sdkPackage, "utf8"));
-if (sdk.version !== "2.10.1") throw new Error("Raycast requires pinned SDK 2.10.1");
+if (sdk.version !== extensionPackage.dependencies["@raycast/api"])
+  throw new Error("Installed Raycast SDK does not match the Raycast manifest");
 const ray = resolve(dirname(sdkPackage), sdk.bin.ray);
 const lockAlias = resolve(cwd, "package-lock.json");
 let createdAlias = false;

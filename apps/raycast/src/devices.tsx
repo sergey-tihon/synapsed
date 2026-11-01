@@ -1,11 +1,11 @@
-import { useEffect, useMemo } from "react";
+import { useEffect, useState } from "react";
 import { Action, ActionPanel, getPreferenceValues, List, openExtensionPreferences } from "@raycast/api";
 import CharacteristicForm, { CommandActions } from "./characteristic-form";
 import { bindingKey, displayValue, Session, useSession } from "./session";
 
 export default function Devices() {
   const { endpoint } = getPreferenceValues<{ endpoint: string }>();
-  const session = useMemo(() => new Session(), [endpoint]);
+  const [session] = useState(() => new Session());
   useEffect(() => {
     session.start(endpoint);
     return () => session.close();

@@ -2,11 +2,18 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "definitions": {
     "ApiError": {
+      "description": "An API error with a bounded, user-safe message.",
       "properties": {
         "code": {
-          "$ref": "#/definitions/ErrorCode"
+          "allOf": [
+            {
+              "$ref": "#/definitions/ErrorCode"
+            }
+          ],
+          "description": "Category identifying the kind of failure."
         },
         "message": {
+          "description": "Bounded human-readable description of the failure.",
           "maxLength": 256,
           "type": "string"
         }
@@ -18,9 +25,15 @@
       "type": "object"
     },
     "Characteristic": {
+      "description": "A characteristic declaration, access policy, and optional current observation.",
       "properties": {
         "access": {
-          "$ref": "#/definitions/CharacteristicAccess"
+          "allOf": [
+            {
+              "$ref": "#/definitions/CharacteristicAccess"
+            }
+          ],
+          "description": "Permissions granted for this characteristic."
         },
         "error": {
           "anyOf": [
@@ -30,22 +43,35 @@
             {
               "type": "null"
             }
-          ]
+          ],
+          "description": "Optional safe description of an error."
         },
         "id": {
+          "description": "Stable identifier within the device.",
           "pattern": "^[a-z][a-z0-9_.-]{0,63}$",
           "type": "string"
         },
         "label": {
+          "description": "User-facing characteristic label.",
           "maxLength": 128,
           "minLength": 1,
           "type": "string"
         },
         "spec": {
-          "$ref": "#/definitions/CharacteristicSpec"
+          "allOf": [
+            {
+              "$ref": "#/definitions/CharacteristicSpec"
+            }
+          ],
+          "description": "Value type and metadata constraints."
         },
         "status": {
-          "$ref": "#/definitions/CharacteristicStatus"
+          "allOf": [
+            {
+              "$ref": "#/definitions/CharacteristicStatus"
+            }
+          ],
+          "description": "Current availability of the characteristic."
         },
         "value": {
           "anyOf": [
@@ -55,7 +81,8 @@
             {
               "type": "null"
             }
-          ]
+          ],
+          "description": "Most recently observed value, when one is available."
         }
       },
       "required": [
@@ -70,14 +97,18 @@
       "type": "object"
     },
     "CharacteristicAccess": {
+      "description": "Read, write, and notification permissions for a characteristic.",
       "properties": {
         "notify": {
+          "description": "Updates may be pushed without polling.",
           "type": "boolean"
         },
         "read": {
+          "description": "The current value may be observed.",
           "type": "boolean"
         },
         "write": {
+          "description": "A command may change the characteristic.",
           "type": "boolean"
         }
       },
@@ -89,10 +120,13 @@
       "type": "object"
     },
     "CharacteristicSpec": {
+      "description": "Metadata describing the shape and constraints of a characteristic value.",
       "oneOf": [
         {
+          "description": "Numeric value with optional bounds, step, integer restriction, and unit.",
           "properties": {
             "integer": {
+              "description": "Whether values must be integral.",
               "type": "boolean"
             },
             "kind": {
@@ -100,24 +134,28 @@
               "type": "string"
             },
             "maximum": {
+              "description": "Inclusive maximum value, when specified.",
               "type": [
                 "number",
                 "null"
               ]
             },
             "minimum": {
+              "description": "Inclusive minimum value, when specified.",
               "type": [
                 "number",
                 "null"
               ]
             },
             "step": {
+              "description": "Positive increment supported by step commands, when specified.",
               "type": [
                 "number",
                 "null"
               ]
             },
             "unit": {
+              "description": "Optional unit label.",
               "maxLength": 32,
               "type": [
                 "string",
@@ -136,6 +174,7 @@
           "type": "object"
         },
         {
+          "description": "Boolean value.",
           "properties": {
             "kind": {
               "const": "boolean",
@@ -148,12 +187,14 @@
           "type": "object"
         },
         {
+          "description": "One value selected from a bounded set of options.",
           "properties": {
             "kind": {
               "const": "enum",
               "type": "string"
             },
             "options": {
+              "description": "Available enum values and their labels.",
               "items": {
                 "$ref": "#/definitions/EnumOption"
               },
@@ -169,12 +210,14 @@
           "type": "object"
         },
         {
+          "description": "Text value with a maximum character count.",
           "properties": {
             "kind": {
               "const": "string",
               "type": "string"
             },
             "maxLength": {
+              "description": "Maximum number of Unicode scalar values accepted.",
               "maximum": 1024,
               "minimum": 0,
               "type": "integer"
@@ -187,6 +230,7 @@
           "type": "object"
         },
         {
+          "description": "Write-only action without a stored value.",
           "properties": {
             "kind": {
               "const": "action",
@@ -201,30 +245,48 @@
       ]
     },
     "CharacteristicStatus": {
-      "enum": [
-        "ok",
-        "unavailable",
-        "error"
-      ],
-      "type": "string"
-    },
-    "CharacteristicValue": {
-      "anyOf": [
+      "description": "Availability state of a characteristic observation.",
+      "oneOf": [
         {
-          "type": "boolean"
+          "const": "ok",
+          "description": "The characteristic has a valid current observation.",
+          "type": "string"
         },
         {
-          "type": "number"
+          "const": "unavailable",
+          "description": "The characteristic is temporarily unavailable.",
+          "type": "string"
         },
         {
-          "maxLength": 1024,
+          "const": "error",
+          "description": "The characteristic operation or observation failed.",
           "type": "string"
         }
       ]
     },
+    "CharacteristicValue": {
+      "anyOf": [
+        {
+          "description": "Boolean characteristic value.",
+          "type": "boolean"
+        },
+        {
+          "description": "Finite numeric characteristic value.",
+          "type": "number"
+        },
+        {
+          "description": "Bounded text characteristic value.",
+          "maxLength": 1024,
+          "type": "string"
+        }
+      ],
+      "description": "JSON-compatible value of a characteristic observation or command."
+    },
     "Device": {
+      "description": "A device declaration and its characteristics.",
       "properties": {
         "characteristics": {
+          "description": "Characteristics declared by the device.",
           "items": {
             "$ref": "#/definitions/Characteristic"
           },
@@ -232,6 +294,7 @@
           "type": "array"
         },
         "driver": {
+          "description": "Identifier of the driver that owns this device.",
           "pattern": "^[a-z][a-z0-9-]{0,63}$",
           "type": "string"
         },
@@ -243,23 +306,32 @@
             {
               "type": "null"
             }
-          ]
+          ],
+          "description": "Optional safe description of a device-level error."
         },
         "id": {
+          "description": "Stable device identifier.",
           "pattern": "^[a-z][a-z0-9_.-]{0,63}$",
           "type": "string"
         },
         "kind": {
+          "description": "Device-kind identifier.",
           "pattern": "^[a-z][a-z0-9_.-]{0,63}$",
           "type": "string"
         },
         "label": {
+          "description": "User-facing device label.",
           "maxLength": 128,
           "minLength": 1,
           "type": "string"
         },
         "status": {
-          "$ref": "#/definitions/DeviceStatus"
+          "allOf": [
+            {
+              "$ref": "#/definitions/DeviceStatus"
+            }
+          ],
+          "description": "Current availability of the device."
         }
       },
       "required": [
@@ -274,24 +346,57 @@
       "type": "object"
     },
     "DeviceStatus": {
-      "enum": [
-        "online",
-        "unavailable"
-      ],
-      "type": "string"
+      "description": "Availability state of a device.",
+      "oneOf": [
+        {
+          "const": "online",
+          "description": "The device is available for operations.",
+          "type": "string"
+        },
+        {
+          "const": "unavailable",
+          "description": "The device cannot currently be used.",
+          "type": "string"
+        }
+      ]
     },
     "DriverState": {
-      "enum": [
-        "disabled",
-        "online",
-        "disconnected",
-        "ambiguous",
-        "permission_denied",
-        "error"
-      ],
-      "type": "string"
+      "description": "Current lifecycle or failure state of an installed driver.",
+      "oneOf": [
+        {
+          "const": "disabled",
+          "description": "The driver is installed but disabled.",
+          "type": "string"
+        },
+        {
+          "const": "online",
+          "description": "The driver is operating normally.",
+          "type": "string"
+        },
+        {
+          "const": "disconnected",
+          "description": "The driver is disconnected from its resource.",
+          "type": "string"
+        },
+        {
+          "const": "ambiguous",
+          "description": "The driver identity or resource is ambiguous.",
+          "type": "string"
+        },
+        {
+          "const": "permission_denied",
+          "description": "Required access was denied.",
+          "type": "string"
+        },
+        {
+          "const": "error",
+          "description": "The driver encountered an error.",
+          "type": "string"
+        }
+      ]
     },
     "DriverStatus": {
+      "description": "Status and optional error details for an installed driver.",
       "properties": {
         "error": {
           "anyOf": [
@@ -301,17 +406,25 @@
             {
               "type": "null"
             }
-          ]
+          ],
+          "description": "Optional safe description of the driver's current error."
         },
         "id": {
+          "description": "Driver identifier.",
           "maxLength": 256,
           "minLength": 1,
           "type": "string"
         },
         "state": {
-          "$ref": "#/definitions/DriverState"
+          "allOf": [
+            {
+              "$ref": "#/definitions/DriverState"
+            }
+          ],
+          "description": "Current driver lifecycle state."
         },
         "version": {
+          "description": "Three-component numeric driver version, or `unknown`.",
           "type": "string"
         }
       },
@@ -324,13 +437,16 @@
       "type": "object"
     },
     "EnumOption": {
+      "description": "A permitted value and its user-facing label for an enum characteristic.",
       "properties": {
         "label": {
+          "description": "User-facing label for the value.",
           "maxLength": 128,
           "minLength": 1,
           "type": "string"
         },
         "value": {
+          "description": "Serialized enum value.",
           "maxLength": 1024,
           "type": "string"
         }
@@ -342,38 +458,106 @@
       "type": "object"
     },
     "ErrorCode": {
-      "enum": [
-        "invalid_request",
-        "forbidden_origin",
-        "forbidden_host",
-        "unknown_device",
-        "unknown_characteristic",
-        "ambiguous_device",
-        "driver_conflict",
-        "unsupported_operation",
-        "invalid_value",
-        "permission_denied",
-        "device_unavailable",
-        "ddc_error",
-        "plugin_error",
-        "unsupported_capability",
-        "busy",
-        "timeout"
-      ],
-      "type": "string"
+      "description": "Machine-readable category describing an API error.",
+      "oneOf": [
+        {
+          "const": "invalid_request",
+          "description": "The request could not be parsed or otherwise violates the API contract.",
+          "type": "string"
+        },
+        {
+          "const": "forbidden_origin",
+          "description": "The request origin is not allowed.",
+          "type": "string"
+        },
+        {
+          "const": "forbidden_host",
+          "description": "The request host is not allowed.",
+          "type": "string"
+        },
+        {
+          "const": "unknown_device",
+          "description": "The requested device does not exist.",
+          "type": "string"
+        },
+        {
+          "const": "unknown_characteristic",
+          "description": "The requested characteristic does not exist.",
+          "type": "string"
+        },
+        {
+          "const": "ambiguous_device",
+          "description": "The request identifies more than one device.",
+          "type": "string"
+        },
+        {
+          "const": "driver_conflict",
+          "description": "The requested driver operation conflicts with current ownership.",
+          "type": "string"
+        },
+        {
+          "const": "unsupported_operation",
+          "description": "The requested operation is not supported.",
+          "type": "string"
+        },
+        {
+          "const": "invalid_value",
+          "description": "A supplied value is invalid.",
+          "type": "string"
+        },
+        {
+          "const": "permission_denied",
+          "description": "The operation is not permitted.",
+          "type": "string"
+        },
+        {
+          "const": "device_unavailable",
+          "description": "The requested device is unavailable.",
+          "type": "string"
+        },
+        {
+          "const": "ddc_error",
+          "description": "A DDC transport operation failed.",
+          "type": "string"
+        },
+        {
+          "const": "plugin_error",
+          "description": "A driver plugin operation failed.",
+          "type": "string"
+        },
+        {
+          "const": "unsupported_capability",
+          "description": "The requested capability is not supported.",
+          "type": "string"
+        },
+        {
+          "const": "busy",
+          "description": "The operation could not proceed because the service is busy.",
+          "type": "string"
+        },
+        {
+          "const": "timeout",
+          "description": "The operation exceeded its deadline.",
+          "type": "string"
+        }
+      ]
     },
     "NodeInfo": {
+      "description": "Identifiers and display name for the daemon node and its running instance.",
       "properties": {
         "instanceId": {
+          "description": "Identifier for this daemon instance, encoded as canonical lowercase UUID-v4.",
           "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
           "type": "string"
         },
         "name": {
+          "description": "User-facing node name.",
           "maxLength": 128,
           "minLength": 1,
           "type": "string"
         },
         "nodeId": {
+          "description": "Stable identifier for this node, encoded as canonical lowercase UUID-v4.",
           "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
           "type": "string"
         }
@@ -386,13 +570,16 @@
       "type": "object"
     }
   },
+  "description": "Complete device and driver state published at a single revision.",
   "properties": {
     "apiVersion": {
+      "description": "Wire API version used by this snapshot.",
       "maximum": 1,
       "minimum": 1,
       "type": "integer"
     },
     "devices": {
+      "description": "Devices represented by this snapshot.",
       "items": {
         "$ref": "#/definitions/Device"
       },
@@ -400,6 +587,7 @@
       "type": "array"
     },
     "drivers": {
+      "description": "Installed driver statuses represented by this snapshot.",
       "items": {
         "$ref": "#/definitions/DriverStatus"
       },
@@ -407,9 +595,15 @@
       "type": "array"
     },
     "node": {
-      "$ref": "#/definitions/NodeInfo"
+      "allOf": [
+        {
+          "$ref": "#/definitions/NodeInfo"
+        }
+      ],
+      "description": "Identity and display name of the node publishing the snapshot."
     },
     "revision": {
+      "description": "Canonical unsigned decimal revision identifier.",
       "pattern": "^(0|[1-9][0-9]*)$",
       "type": "string"
     }

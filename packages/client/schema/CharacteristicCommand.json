@@ -4,28 +4,39 @@
     "CharacteristicValue": {
       "anyOf": [
         {
+          "description": "Boolean characteristic value.",
           "type": "boolean"
         },
         {
+          "description": "Finite numeric characteristic value.",
           "type": "number"
         },
         {
+          "description": "Bounded text characteristic value.",
           "maxLength": 1024,
           "type": "string"
         }
-      ]
+      ],
+      "description": "JSON-compatible value of a characteristic observation or command."
     }
   },
+  "description": "Write operation requested for a characteristic.",
   "oneOf": [
     {
       "additionalProperties": false,
+      "description": "Set a characteristic to the supplied value.",
       "properties": {
         "op": {
           "const": "set",
           "type": "string"
         },
         "value": {
-          "$ref": "#/definitions/CharacteristicValue"
+          "allOf": [
+            {
+              "$ref": "#/definitions/CharacteristicValue"
+            }
+          ],
+          "description": "Target value for the set operation."
         }
       },
       "required": [
@@ -36,12 +47,14 @@
     },
     {
       "additionalProperties": false,
+      "description": "Move a numeric or enum characteristic by a relative number of steps.",
       "properties": {
         "op": {
           "const": "step",
           "type": "string"
         },
         "steps": {
+          "description": "Signed number of steps, constrained to the inclusive range -100 through 100.",
           "maximum": 100,
           "minimum": -100,
           "type": "integer"
@@ -55,6 +68,7 @@
     },
     {
       "additionalProperties": false,
+      "description": "Invert the current value of a boolean characteristic.",
       "properties": {
         "op": {
           "const": "toggle",
@@ -68,6 +82,7 @@
     },
     {
       "additionalProperties": false,
+      "description": "Invoke a write-only action characteristic.",
       "properties": {
         "op": {
           "const": "invoke",

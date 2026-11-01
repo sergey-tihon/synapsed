@@ -4,7 +4,7 @@ use crate::{
     VcpValue, protocol,
 };
 use std::{
-    ffi::{c_char, c_void},
+    ffi::{CStr, c_char, c_void},
     marker::PhantomData,
     ptr,
     rc::Rc,
@@ -45,6 +45,9 @@ unsafe extern "C" {
         options: u32,
     ) -> CFRef;
     fn IORegistryEntryGetRegistryEntryID(entry: u32, id: *mut u64) -> i32;
+    fn IORegistryEntryGetParentEntry(entry: u32, plane: *const c_char, parent: *mut u32) -> i32;
+    fn IORegistryEntryGetName(entry: u32, name: *mut c_char) -> i32;
+    fn IOObjectConformsTo(object: u32, class_name: *const c_char) -> u32;
 }
 #[link(name = "CoreFoundation", kind = "framework")]
 unsafe extern "C" {
@@ -100,6 +103,7 @@ impl Drop for IOHandle {
 }
 
 type CopyEdid = unsafe extern "C" fn(CFRef, *mut CFRef) -> i32;
+/// macOS IOAV backend for scanning and operating external display endpoints.
 pub struct MacosBackend {
     copy_edid: Option<CopyEdid>,
     location_key: CFHandle,
@@ -107,6 +111,7 @@ pub struct MacosBackend {
     _owner_only: PhantomData<Rc<()>>,
 }
 impl MacosBackend {
+    /// Create a macOS backend and prepare its owner-local registry keys.
     pub fn new() -> Result<Self, DriverError> {
         // Symbol absence is expected on some OS versions and is not a capability failure.
         let symbol = unsafe { libc::dlsym(libc::RTLD_DEFAULT, c"IOAVServiceCopyEDID".as_ptr()) };
@@ -161,6 +166,37 @@ fn native_error(code: i32) -> DriverError {
     } else {
         protocol::ddc_error("Native display DDC transaction failed.")
     }
+}
+fn placement(service: u32) -> Option<crate::Placement> {
+    let mut parent = 0;
+    let result =
+        unsafe { IORegistryEntryGetParentEntry(service, c"IOService".as_ptr(), &mut parent) };
+    if result != 0 {
+        return None;
+    }
+    let parent = IOHandle::owned(parent)?;
+    if unsafe { IOObjectConformsTo(parent.0, c"IOFramebuffer".as_ptr()) } == 0 {
+        return None;
+    }
+    let mut name = [0 as c_char; 128];
+    if unsafe { IORegistryEntryGetName(parent.0, name.as_mut_ptr()) } != 0 {
+        return None;
+    }
+    let connector = unsafe { CStr::from_ptr(name.as_ptr()) }
+        .to_string_lossy()
+        .trim()
+        .to_owned();
+    if connector.is_empty() {
+        return None;
+    }
+    let mut registry_id = 0;
+    if unsafe { IORegistryEntryGetRegistryEntryID(parent.0, &mut registry_id) } != 0 {
+        return None;
+    }
+    Some(crate::Placement {
+        connector,
+        controller_key: format!("macos-framebuffer-{registry_id}"),
+    })
 }
 impl DdcBackend for MacosBackend {
     fn scan(&mut self) -> Result<InventoryWithOwnedHandles, DriverError> {
@@ -224,6 +260,7 @@ impl DdcBackend for MacosBackend {
                     .as_ref()
                     .and_then(|identity| identity.product_name.clone()),
                 identity: identity.map(|identity| identity.identity),
+                placement: placement(entry.0),
                 transport: Box::new(MacosTransport { service }),
             });
         }
@@ -241,7 +278,7 @@ impl MacosTransport {
                 0x37,
                 0x51,
                 frame.as_mut_ptr(),
-                frame.len() as u32,
+                u32::try_from(frame.len()).unwrap_or(u32::MAX),
             )
         };
         if result != 0 {
@@ -261,7 +298,7 @@ impl DdcTransport for MacosTransport {
                 0x37,
                 0,
                 reply.as_mut_ptr(),
-                reply.len() as u32,
+                u32::try_from(reply.len()).unwrap_or(u32::MAX),
             )
         };
         if result != 0 {

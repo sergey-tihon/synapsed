@@ -2,7 +2,7 @@
 use axum::{
     body::Body,
     extract::Request,
-    http::{Method, StatusCode, header},
+    http::{HeaderValue, Method, StatusCode, header},
     response::{IntoResponse, Response},
 };
 use bytes::Bytes;
@@ -51,13 +51,15 @@ pub(crate) fn serve(request: Request) -> Response {
         mime.as_ref().parse().expect("MIME header"),
     );
     headers.insert(header::CONTENT_LENGTH, file.contents().len().into());
-    headers.insert(
-        header::CACHE_CONTROL,
-        "no-cache".parse().expect("static header"),
-    );
+    let cache_control = HeaderValue::from_static(if asset_path.starts_with("assets/") {
+        "public, max-age=31536000, immutable"
+    } else {
+        "no-cache"
+    });
+    headers.insert(header::CACHE_CONTROL, cache_control);
     headers.insert(
         header::X_CONTENT_TYPE_OPTIONS,
-        "nosniff".parse().expect("static header"),
+        HeaderValue::from_static("nosniff"),
     );
     response
 }

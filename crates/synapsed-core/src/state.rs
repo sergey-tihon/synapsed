@@ -5,12 +5,13 @@ use std::{
     time::Instant,
 };
 use synapsed_api::{
-    CharacteristicStatus, Device, DeviceStatus, DriverState, DriverStatus, MAX_SNAPSHOT_BYTES,
-    NodeInfo, Snapshot, StatusResponse,
+    API_VERSION, CharacteristicStatus, Device, DeviceStatus, DriverState, DriverStatus,
+    MAX_SNAPSHOT_BYTES, NodeInfo, Snapshot, StatusResponse,
 };
 use tokio::sync::watch;
 
 #[derive(Clone)]
+/// Validated, immutable snapshots and driver reports shared with subscribers.
 pub struct StateStore {
     inner: Arc<Inner>,
 }
@@ -28,8 +29,7 @@ struct State {
 impl StateStore {
     /// Fixed fault text keeps retained observations publishable at the wire-size limit.
     pub const FAULT_MESSAGE: &'static str = "Driver unavailable.";
-    /// Validate a candidate without copying its values or encoding a second snapshot.
-    /// Reserve the longest revision and compact errors on every public state field.
+    /// Validate without copying values; reserve space for the longest revision and compact fault errors.
     pub fn validate_snapshot(snapshot: &Snapshot) -> Result<Vec<u8>, DriverError> {
         static FAULT_ERROR: LazyLock<DriverError> = LazyLock::new(|| {
             DriverError::new(ErrorCode::UnsupportedCapability, StateStore::FAULT_MESSAGE)
@@ -60,9 +60,10 @@ impl StateStore {
         }
         Ok(encoded)
     }
+    /// Create a state store initialized with the supplied node identity.
     pub fn new(node: NodeInfo) -> Result<Self, DriverError> {
         let snapshot = Snapshot {
-            api_version: 1,
+            api_version: API_VERSION,
             node,
             revision: "0".into(),
             drivers: vec![],
@@ -84,6 +85,7 @@ impl StateStore {
             }),
         })
     }
+    /// Return the current immutable published snapshot.
     pub fn snapshot(&self) -> Arc<Snapshot> {
         self.inner
             .state
@@ -92,6 +94,7 @@ impl StateStore {
             .snapshot
             .clone()
     }
+    /// Return the compact JSON encoding of the current published snapshot.
     pub fn encoded_snapshot(&self) -> Arc<[u8]> {
         self.inner
             .state
@@ -100,19 +103,23 @@ impl StateStore {
             .encoded
             .clone()
     }
+    /// Subscribe to published snapshots; receivers observe the latest replacement.
     pub fn subscribe(&self) -> watch::Receiver<Arc<Snapshot>> {
         self.inner.changed.subscribe()
     }
+    /// Return a status response with the current revision, drivers, and uptime.
     pub fn status(&self) -> StatusResponse {
         let snapshot = self.snapshot();
         StatusResponse {
-            api_version: 1,
+            api_version: API_VERSION,
             node: snapshot.node.clone(),
             revision: snapshot.revision.clone(),
-            uptime_seconds: self.inner.started.elapsed().as_secs().min(u32::MAX as u64) as u32,
+            uptime_seconds: u32::try_from(self.inner.started.elapsed().as_secs())
+                .unwrap_or(u32::MAX),
             drivers: snapshot.drivers.clone(),
         }
     }
+    /// Replace one driver's report and publish the resulting snapshot atomically.
     pub fn publish_driver_state(
         &self,
         id: &str,
@@ -173,7 +180,7 @@ impl StateStore {
                 prospective.insert(id.as_str(), report);
             }
             Snapshot {
-                api_version: 1,
+                api_version: API_VERSION,
                 node: state.snapshot.node.clone(),
                 revision: revision.to_string(),
                 drivers: prospective

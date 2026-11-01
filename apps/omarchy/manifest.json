@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "id": "sergey-tihon.synapsed",
+  "name": "Synapsed",
+  "version": "0.1.0",
+  "author": "Sergey Tihon",
+  "description": "Synapsed daemon status and device characteristic controls",
+  "kinds": ["bar-widget"],
+  "entryPoints": { "barWidget": "Widget.qml" },
+  "barWidget": {
+    "displayName": "Synapsed",
+    "description": "Synapsed daemon status and device characteristic controls",
+    "category": "System",
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": { "endpoint": "http://127.0.0.1:24816" },
+    "schema": [{ "key": "endpoint", "type": "string", "label": "Endpoint" }]
+  }
+}

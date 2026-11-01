@@ -11,11 +11,10 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     future::Future,
     pin::Pin,
-    sync::Mutex,
     time::Instant,
 };
 use synapsed_core::{DriverError, ErrorCode};
-use synapsed_ddc::{DdcClient, EndpointDescriptor};
+use synapsed_ddc::{DdcClient, EndpointDescriptor, LazyDdc};
 
 #[derive(Clone)]
 pub(crate) struct Endpoint {
@@ -68,70 +67,28 @@ struct Binding {
 }
 
 pub struct DdcCapabilityFactory {
-    client: std::sync::Arc<Mutex<Option<DdcClient>>>,
+    client: LazyDdc,
 }
 impl DdcCapabilityFactory {
     pub fn new(client: DdcClient) -> Self {
-        Self {
-            client: std::sync::Arc::new(Mutex::new(Some(client))),
-        }
+        Self::with_shared(LazyDdc::with_client(client))
     }
     pub fn lazy_native() -> Self {
-        Self {
-            client: std::sync::Arc::new(Mutex::new(None)),
-        }
+        Self::with_shared(LazyDdc::new())
     }
-    fn resolve_client(source: &Mutex<Option<DdcClient>>) -> Result<DdcClient, DriverError> {
-        let mut client = source.lock().expect("native client lock");
-        if client.is_none() {
-            *client = Some(DdcClient::start_native()?);
-        }
-        Ok(client.as_ref().expect("started client").clone())
+    pub fn with_shared(client: LazyDdc) -> Self {
+        Self { client }
     }
-}
-impl LuaCapabilityFactory for DdcCapabilityFactory {
-    fn id(&self) -> &'static str {
-        "ddc"
+    fn resolve_client(source: &LazyDdc) -> Result<DdcClient, DriverError> {
+        source.get_or_start_native()
     }
-    fn version(&self) -> u32 {
-        1
-    }
-    fn validate_permissions(&self, permissions: &serde_json::Value) -> Result<(), DriverError> {
-        Permissions::parse(permissions).map(|_| ())
-    }
-    fn read_permissions(
-        &self,
-        permissions: &serde_json::Value,
-    ) -> Result<BTreeSet<u8>, DriverError> {
-        Ok(Permissions::parse(permissions)?.read.into_iter().collect())
-    }
-    fn validate_bindings(
-        &self,
-        permissions: &serde_json::Value,
-        bindings: &serde_json::Value,
-    ) -> Result<BTreeMap<u8, u16>, DriverError> {
-        let permissions = Permissions::parse(permissions)?;
-        let bindings: Vec<Binding> =
-            serde_json::from_value(bindings.clone()).map_err(|_| denied())?;
-        let mut result = BTreeMap::new();
-        for binding in bindings {
-            if binding.change_mask == 0
-                || !permissions.read.contains(&binding.code)
-                || !permissions.write.contains(&binding.code)
-                || result.insert(binding.code, binding.change_mask).is_some()
-            {
-                return Err(denied());
-            }
-        }
-        Ok(result)
-    }
-    fn install(&self, lua: &Lua, invocation: InvocationContext) -> mlua::Result<Table> {
-        let client = self.client.clone();
-        let permissions =
-            Permissions::parse(&invocation.permissions).map_err(mlua::Error::external)?;
-        let table = lua.create_table()?;
-        let context = invocation.clone();
-        let enumerate_client = client.clone();
+    fn register_enumerate(
+        lua: &Lua,
+        table: &Table,
+        client: LazyDdc,
+        context: InvocationContext,
+    ) -> mlua::Result<()> {
+        let enumerate_client = client;
         table.raw_set(
             "enumerate",
             lua.create_async_function(move |lua, _: Table| {
@@ -180,10 +137,17 @@ impl LuaCapabilityFactory for DdcCapabilityFactory {
                 }
             })?,
         )?;
-        let context = invocation.clone();
-        let get_client = client.clone();
-        let reads: std::sync::Arc<BTreeSet<u8>> =
-            std::sync::Arc::new(permissions.read.into_iter().collect());
+        Ok(())
+    }
+
+    fn register_get_vcp(
+        lua: &Lua,
+        table: &Table,
+        client: LazyDdc,
+        context: InvocationContext,
+        reads: std::sync::Arc<BTreeSet<u8>>,
+    ) -> mlua::Result<()> {
+        let get_client = client;
         table.raw_set(
             "get_vcp",
             lua.create_async_function(
@@ -219,9 +183,16 @@ impl LuaCapabilityFactory for DdcCapabilityFactory {
                 },
             )?,
         )?;
-        let context = invocation;
-        let writes: std::sync::Arc<BTreeSet<u8>> =
-            std::sync::Arc::new(permissions.write.into_iter().collect());
+        Ok(())
+    }
+
+    fn register_set_vcp(
+        lua: &Lua,
+        table: &Table,
+        client: LazyDdc,
+        context: InvocationContext,
+        writes: std::sync::Arc<BTreeSet<u8>>,
+    ) -> mlua::Result<()> {
         table.raw_set(
             "set_vcp",
             lua.create_async_function(
@@ -262,13 +233,67 @@ impl LuaCapabilityFactory for DdcCapabilityFactory {
                 },
             )?,
         )?;
+        Ok(())
+    }
+}
+impl LuaCapabilityFactory for DdcCapabilityFactory {
+    fn id(&self) -> &'static str {
+        "ddc"
+    }
+    fn version(&self) -> u32 {
+        1
+    }
+    fn validate_permissions(&self, permissions: &serde_json::Value) -> Result<(), DriverError> {
+        Permissions::parse(permissions).map(|_| ())
+    }
+    fn read_permissions(
+        &self,
+        permissions: &serde_json::Value,
+    ) -> Result<BTreeSet<u8>, DriverError> {
+        Ok(Permissions::parse(permissions)?.read.into_iter().collect())
+    }
+    fn validate_bindings(
+        &self,
+        permissions: &serde_json::Value,
+        bindings: &serde_json::Value,
+    ) -> Result<BTreeMap<u8, u16>, DriverError> {
+        let permissions = Permissions::parse(permissions)?;
+        let bindings: Vec<Binding> =
+            serde_json::from_value(bindings.clone()).map_err(|_| denied())?;
+        let mut result = BTreeMap::new();
+        for binding in bindings {
+            if binding.change_mask == 0
+                || !permissions.read.contains(&binding.code)
+                || !permissions.write.contains(&binding.code)
+                || result.insert(binding.code, binding.change_mask).is_some()
+            {
+                return Err(denied());
+            }
+        }
+        Ok(result)
+    }
+    fn install(&self, lua: &Lua, invocation: InvocationContext) -> mlua::Result<Table> {
+        let client = self.client.clone();
+        let permissions =
+            Permissions::parse(&invocation.permissions).map_err(mlua::Error::external)?;
+        let table = lua.create_table()?;
+
+        Self::register_enumerate(lua, &table, client.clone(), invocation.clone())?;
+
+        let reads: std::sync::Arc<BTreeSet<u8>> =
+            std::sync::Arc::new(permissions.read.into_iter().collect());
+        Self::register_get_vcp(lua, &table, client.clone(), invocation.clone(), reads)?;
+
+        let writes: std::sync::Arc<BTreeSet<u8>> =
+            std::sync::Arc::new(permissions.write.into_iter().collect());
+        Self::register_set_vcp(lua, &table, client, invocation, writes)?;
         Ok(table)
     }
     fn shutdown(
         &self,
         deadline: Instant,
     ) -> Pin<Box<dyn Future<Output = Result<(), DriverError>> + Send + '_>> {
-        let client = self.client.lock().expect("native client lock").clone();
+        let client = self.client.existing();
         Box::pin(async move {
             match client {
                 Some(client) => client.shutdown(deadline).await,

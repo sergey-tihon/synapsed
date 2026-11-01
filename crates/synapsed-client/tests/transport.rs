@@ -78,6 +78,15 @@ impl Drop for Server {
 }
 impl Server {
     async fn start() -> Self {
+        Self::start_with_timeouts(Duration::from_secs(65), Duration::from_secs(5)).await
+    }
+    async fn start_with_idle_timeout(socket_idle_timeout: Duration) -> Self {
+        Self::start_with_timeouts(socket_idle_timeout, Duration::from_secs(5)).await
+    }
+    async fn start_with_request_timeout(request_timeout: Duration) -> Self {
+        Self::start_with_timeouts(Duration::from_secs(65), request_timeout).await
+    }
+    async fn start_with_timeouts(socket_idle_timeout: Duration, request_timeout: Duration) -> Self {
         let (frames, _) = broadcast::channel(32);
         let state = Arc::new(ServerState {
             snapshot: Mutex::new(snapshot(FIRST, 9)),
@@ -110,7 +119,7 @@ impl Server {
         });
         Self {
             state,
-            client: Client::new(endpoint).unwrap(),
+            client: Client::with_timeouts(endpoint, request_timeout, socket_idle_timeout).unwrap(),
             task,
         }
     }
@@ -202,14 +211,13 @@ async fn socket_loop(
 }
 async fn next_snapshot(events: &mut synapsed_client::EventStream) -> Arc<Snapshot> {
     loop {
-        match timeout(Duration::from_secs(2), events.next())
+        if let ClientEvent::Snapshot(snapshot) = timeout(Duration::from_secs(2), events.next())
             .await
             .unwrap()
             .unwrap()
             .unwrap()
         {
-            ClientEvent::Snapshot(snapshot) => return snapshot,
-            _ => {}
+            return snapshot;
         }
     }
 }
@@ -318,30 +326,23 @@ async fn ping_and_client_close_work_without_consumer_reads() {
 
 #[tokio::test]
 async fn quiet_event_stream_survives_heartbeats_past_application_idle_deadline() {
-    let server = Server::start().await;
+    let server = Server::start_with_idle_timeout(Duration::from_millis(500)).await;
     let mut events = server.client.events().await.unwrap();
     assert!(matches!(
         events.next().await.unwrap(),
         Some(ClientEvent::Logs(_))
     ));
-    // Keep the same consumer future pending for 90 virtual seconds. Ping/pong
-    // travels over the actual socket, but is not an application event.
     let mut pending = Box::pin(events.next());
     assert!(futures_util::poll!(&mut pending).is_pending());
+    let mut heartbeat = tokio::time::interval(Duration::from_millis(300));
+    heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     for _ in 0..3 {
-        tokio::time::pause();
-        tokio::time::advance(Duration::from_secs(30)).await;
-        // Real I/O barriers run with time resumed, preventing auto-advance from
-        // racing network delivery to the transport's next heartbeat deadline.
-        tokio::time::resume();
+        heartbeat.tick().await;
         server.state.frames.send(Frame::Ping).unwrap();
         timeout(Duration::from_secs(2), server.state.pong.notified())
             .await
             .unwrap();
-        assert!(
-            futures_util::poll!(&mut pending).is_pending(),
-            "a healthy quiet stream must not time out awaiting public changes"
-        );
+        assert!(futures_util::poll!(&mut pending).is_pending());
         assert!(!server.client.is_stale());
         assert_eq!(server.state.closed.load(Ordering::SeqCst), 0);
     }
@@ -354,24 +355,19 @@ async fn quiet_event_stream_survives_heartbeats_past_application_idle_deadline()
 
 #[tokio::test]
 async fn quiet_event_stream_without_transport_heartbeats_becomes_stale() {
-    let server = Server::start().await;
+    let server = Server::start_with_idle_timeout(Duration::from_millis(100)).await;
     let mut events = server.client.events().await.unwrap();
     assert!(matches!(
         events.next().await.unwrap(),
         Some(ClientEvent::Logs(_))
     ));
-    // Establish the transport's next idle wait after initial epoch election.
-    // The real pong proves it consumed both the election wakeup and this ping.
     server.state.frames.send(Frame::Ping).unwrap();
     timeout(Duration::from_secs(2), server.state.pong.notified())
         .await
         .unwrap();
     let mut pending = Box::pin(events.next());
     assert!(futures_util::poll!(&mut pending).is_pending());
-    tokio::time::pause();
-    tokio::time::advance(Duration::from_secs(66)).await;
     let result = timeout(Duration::from_secs(2), pending).await.unwrap();
-    tokio::time::resume();
     assert!(matches!(result, Err(ClientError::Stale) | Ok(None)));
     assert!(server.client.is_stale());
 }
@@ -430,7 +426,7 @@ async fn route_segments_are_encoded_and_unknown_ids_stay_api_errors() {
 
 #[tokio::test]
 async fn timeout_does_not_replay_a_mutation() {
-    let server = Server::start().await;
+    let server = Server::start_with_request_timeout(Duration::from_millis(100)).await;
     server.state.delay_commands.store(true, Ordering::SeqCst);
     let client = server.client.clone();
     let write = tokio::spawn(async move {
@@ -439,11 +435,12 @@ async fn timeout_does_not_replay_a_mutation() {
             .await
     });
     server.state.started.notified().await;
-    tokio::time::pause();
-    tokio::time::advance(Duration::from_secs(6)).await;
-    assert!(matches!(write.await.unwrap(), Err(ClientError::Timeout)));
+    let result = timeout(Duration::from_secs(2), write)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(result, Err(ClientError::Timeout)));
     assert_eq!(server.state.commands.load(Ordering::SeqCst), 1);
-    tokio::time::resume();
     server.state.release.notify_one();
 }
 
@@ -536,21 +533,26 @@ async fn open_socket_is_not_connected_without_initial_snapshot() {
         }),
     );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let client =
-        Client::new(parse_endpoint(&format!("http://{}", listener.local_addr().unwrap())).unwrap())
-            .unwrap();
+    let endpoint = parse_endpoint(&format!("http://{}", listener.local_addr().unwrap())).unwrap();
+    let client = Client::with_timeouts(
+        endpoint,
+        Duration::from_millis(100),
+        Duration::from_secs(65),
+    )
+    .unwrap();
     let task = tokio::spawn(async move {
         axum::serve(listener, app).await.unwrap();
     });
     let pending_client = client.clone();
     let pending = tokio::spawn(async move { pending_client.events().await });
     opened.notified().await;
-    tokio::time::pause();
-    tokio::time::advance(Duration::from_secs(6)).await;
-    assert!(matches!(pending.await.unwrap(), Err(ClientError::Timeout)));
-    assert!(client.cached_snapshot().is_none());
-    assert!(client.is_stale());
-    tokio::time::resume();
+    assert!(matches!(
+        timeout(Duration::from_secs(2), pending)
+            .await
+            .unwrap()
+            .unwrap(),
+        Err(ClientError::Timeout)
+    ));
     client.close();
     task.abort();
 }

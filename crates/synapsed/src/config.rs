@@ -4,6 +4,7 @@ use serde::Deserialize;
 use serde_json::Value;
 use std::{
     collections::BTreeMap,
+    ffi::OsString,
     fs::{self, File, OpenOptions},
     io::{Read, Write},
     net::SocketAddr,
@@ -11,6 +12,7 @@ use std::{
     path::{Path, PathBuf},
 };
 use synapsed_api::{ApiError, ErrorCode, NodeInfo};
+use synapsed_plugins::{MAX_SETTINGS_DEPTH, PluginConfig};
 use uuid::Uuid;
 
 const MAX_CONFIG_BYTES: u64 = 64 * 1024;
@@ -38,13 +40,13 @@ pub struct ConfigPaths {
     pub state_home: PathBuf,
 }
 impl ConfigPaths {
-    pub fn from_environment() -> Result<Self, ApiError> {
-        let home = std::env::var_os("HOME")
+    pub fn from_environment(env: impl Fn(&str) -> Option<OsString>) -> Result<Self, ApiError> {
+        let home = env("HOME")
             .map(PathBuf::from)
             .filter(|path| path.is_absolute())
             .ok_or_else(|| invalid("HOME must identify an absolute home directory."))?;
         let xdg = |key, fallback: &str| {
-            std::env::var_os(key)
+            env(key)
                 .map(PathBuf::from)
                 .filter(|path| path.is_absolute())
                 .unwrap_or_else(|| home.join(fallback))
@@ -104,7 +106,10 @@ impl Default for RawPlugins {
 }
 impl Config {
     pub fn load(selected: Option<&Path>) -> Result<Self, ApiError> {
-        Self::load_with_paths(selected, &ConfigPaths::from_environment()?)
+        Self::load_with_paths(
+            selected,
+            &ConfigPaths::from_environment(|key| std::env::var_os(key))?,
+        )
     }
     pub fn load_with_paths(selected: Option<&Path>, paths: &ConfigPaths) -> Result<Self, ApiError> {
         let path = match selected {
@@ -133,7 +138,7 @@ impl Config {
         config_file: &Path,
         paths: &ConfigPaths,
     ) -> Result<Self, ApiError> {
-        if source.len() as u64 > MAX_CONFIG_BYTES {
+        if u64::try_from(source.len()).unwrap_or(u64::MAX) > MAX_CONFIG_BYTES {
             return Err(invalid("Daemon configuration exceeds 64 KiB."));
         }
         let raw: RawConfig = toml::from_str(source).map_err(|_| {
@@ -158,31 +163,17 @@ impl Config {
         if let Some(name) = &raw.server.name {
             synapsed_api::validate_label(name)?;
         }
-        if raw.plugins.discovery_interval_ms < 1000
-            || raw.plugins.discovery_interval_ms > u32::MAX as u64
-        {
+        if raw.plugins.discovery_interval_ms > u64::from(u32::MAX) {
             return Err(invalid(
                 "Discovery interval must be between 1000 and 4294967295 milliseconds.",
             ));
         }
-        if raw.plugins.disabled.len() > 16 || raw.plugins.settings.len() > 16 {
-            return Err(invalid("Plugin configuration exceeds the package limit."));
-        }
-        let mut disabled = std::collections::BTreeSet::new();
-        for id in &raw.plugins.disabled {
-            synapsed_api::validate_driver_id(id)?;
-            if !disabled.insert(id) {
-                return Err(invalid("Disabled package IDs must be unique."));
-            }
-        }
         let mut settings = BTreeMap::new();
         for (id, value) in &raw.plugins.settings {
-            synapsed_api::validate_driver_id(id)?;
             if !value.is_table() {
                 return Err(invalid("Package settings must be a table."));
             }
-            let mut entries = 0;
-            validate_settings(value, 0, &mut entries)?;
+            validate_toml_settings(value, 0)?;
             settings.insert(
                 id.clone(),
                 serde_json::to_value(value)
@@ -192,7 +183,21 @@ impl Config {
         let base = config_file
             .parent()
             .ok_or_else(|| invalid("Configuration must have a parent directory."))?;
-        let plugin_directory_explicit = raw.plugins.directory.is_some();
+        let directory_explicit = raw.plugins.directory.is_some();
+        let directory = match raw.plugins.directory.as_deref() {
+            Some(path) => resolve_path(path, base, &paths.home)?,
+            None => paths.data_home.join("synapsed/drivers"),
+        };
+        let plugin_config = PluginConfig {
+            directory,
+            directory_explicit,
+            disabled: raw.plugins.disabled,
+            discovery_interval_ms: raw.plugins.discovery_interval_ms,
+            settings,
+        };
+        plugin_config
+            .validate_with_max_settings_entries(2048)
+            .map_err(|_| invalid("Plugin configuration is invalid or exceeds data limits."))?;
         Ok(Self {
             listen,
             allowed_origins: raw.server.allowed_origins,
@@ -201,14 +206,11 @@ impl Config {
                 Some(path) => resolve_path(&path, base, &paths.home)?,
                 None => paths.state_home.join("synapsed"),
             },
-            plugin_directory: match raw.plugins.directory {
-                Some(path) => resolve_path(&path, base, &paths.home)?,
-                None => paths.data_home.join("synapsed/drivers"),
-            },
-            plugin_directory_explicit,
-            disabled: raw.plugins.disabled,
-            discovery_interval_ms: raw.plugins.discovery_interval_ms,
-            settings,
+            plugin_directory: plugin_config.directory,
+            plugin_directory_explicit: plugin_config.directory_explicit,
+            disabled: plugin_config.disabled,
+            discovery_interval_ms: plugin_config.discovery_interval_ms,
+            settings: plugin_config.settings,
         })
     }
 }
@@ -231,37 +233,27 @@ fn resolve_path(path: &Path, base: &Path, home: &Path) -> Result<PathBuf, ApiErr
         base.join(path)
     })
 }
-fn validate_settings(
-    value: &toml::Value,
-    depth: usize,
-    entries: &mut usize,
-) -> Result<(), ApiError> {
-    *entries += 1;
-    if depth > 8 || *entries > 2048 {
-        return Err(invalid("Package settings exceed plain-data limits."));
+
+fn validate_toml_settings(value: &toml::Value, depth: usize) -> Result<(), ApiError> {
+    if depth > MAX_SETTINGS_DEPTH {
+        return Ok(());
     }
     match value {
-        toml::Value::String(value) if value.chars().count() > 1024 => {
-            Err(invalid("Package setting string exceeds 1024 characters."))
-        }
-        toml::Value::Float(value) if !value.is_finite() => {
-            Err(invalid("Package setting numbers must be finite."))
-        }
         toml::Value::Datetime(_) => Err(invalid(
             "Package settings must be plain JSON data, not TOML dates.",
         )),
+        toml::Value::Float(number) if !number.is_finite() => Err(invalid(
+            "Package settings must be plain JSON data, not non-finite numbers.",
+        )),
         toml::Value::Array(values) => {
             for value in values {
-                validate_settings(value, depth + 1, entries)?;
+                validate_toml_settings(value, depth + 1)?;
             }
             Ok(())
         }
         toml::Value::Table(values) => {
-            for (key, value) in values {
-                if key.chars().count() > 128 {
-                    return Err(invalid("Package setting key is too long."));
-                }
-                validate_settings(value, depth + 1, entries)?;
+            for value in values.values() {
+                validate_toml_settings(value, depth + 1)?;
             }
             Ok(())
         }

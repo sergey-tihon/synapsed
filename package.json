@@ -15,12 +15,18 @@
   ],
   "overrides": {
     "zod": "^4.6.7",
+    "@solidjs/babel-plugin": "2.0.0-rc.15",
+    "@solidjs/compiler": "2.0.0-rc.15",
     "seroval": "1.6.11",
     "@raycast/api": {
       "minimatch": "11.0.1"
     }
   },
   "scripts": {
+    "brand": "node scripts/brand.mjs generate",
+    "brand:check": "node scripts/brand.mjs check",
+    "notices": "node scripts/notices.mjs generate",
+    "notices:check": "node scripts/notices.mjs check",
     "build": "node scripts/workspace.mjs build",
     "api:generate": "node scripts/api.mjs generate",
     "api:check": "node scripts/api.mjs check",
@@ -42,6 +48,7 @@
     "watch": "npm run build:client && npm run watch --workspace @synapsed/streamdeck",
     "dev:web": "npm run build:client && npm run dev --workspace @synapsed/web",
     "dev:raycast": "npm run build:client && node apps/raycast/scripts/run-ray.mjs develop",
+    "lint": "node scripts/workspace.mjs lint",
     "audit": "npm audit --workspaces --include-workspace-root --omit=dev",
     "format": "npm run format:rust && npm run format:web && npm run format:lua",
     "format:check": "npm run format:rust:check && npm run format:web:check && npm run format:lua:check",
@@ -55,6 +62,9 @@
   },
   "devDependencies": {
     "@johnnymorganz/stylua-bin": "2.5.2",
+    "@resvg/resvg-js": "2.6.2",
+    "@solidjs/babel-plugin": "2.0.0-rc.15",
+    "@solidjs/compiler": "2.0.0-rc.15",
     "prettier": "3.8.3"
   }
 }

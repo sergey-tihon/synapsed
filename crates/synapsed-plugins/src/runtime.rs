@@ -28,6 +28,8 @@ use synapsed_core::{
 };
 use synapsed_ddc::EndpointDescriptor;
 use tokio::sync::{mpsc, oneshot};
+type CharacteristicWrites = BTreeMap<String, BTreeMap<u8, u16>>;
+type ParsedCharacteristics = (Vec<Characteristic>, CharacteristicWrites);
 
 pub(crate) const CALLBACK_LIMIT: Duration = Duration::from_secs(5);
 pub(crate) fn exposed_error(error: &DriverError) -> DriverError {
@@ -68,7 +70,7 @@ impl From<mlua::Error> for Failure {
             _ => "callback",
         };
         let code = error.downcast_ref::<DriverError>().map(|error| error.code);
-        tracing::error!(target: "plugins", kind, code = ?code, "Guarded Lua callback failed.");
+        tracing::error!(target: "synapsed::plugins", public_message = %"Guarded Lua callback failed.", kind, code = ?code);
         Self::fatal(DriverError::new(
             ErrorCode::PluginError,
             "Lua execution or exchanged data failed validation.",
@@ -196,13 +198,13 @@ impl InvocationContext {
                 "Native operation is outside this callback's endpoint or register grant.",
             ));
         }
-        if let Some(operation) = &self.operation {
-            if let Err(error) = operation.validate(token, code, write) {
-                if error.code == ErrorCode::PermissionDenied {
-                    self.guard.trip();
-                }
-                return Err(error);
+        if let Some(operation) = &self.operation
+            && let Err(error) = operation.validate(token, code, write)
+        {
+            if error.code == ErrorCode::PermissionDenied {
+                self.guard.trip();
             }
+            return Err(error);
         }
         Ok(())
     }
@@ -267,6 +269,25 @@ struct Definition {
     refresh: Function,
     write: Option<Function>,
     stop: Option<Function>,
+}
+#[derive(Clone)]
+enum CallbackKind<'a> {
+    Observe,
+    Refresh,
+    Write {
+        characteristic: &'a str,
+        command: CharacteristicCommand,
+    },
+    Stop,
+    Event(Json),
+}
+impl CallbackKind<'_> {
+    fn is_write(&self) -> bool {
+        matches!(self, Self::Write { .. } | Self::Stop)
+    }
+    fn is_refresh(&self) -> bool {
+        matches!(self, Self::Refresh)
+    }
 }
 struct Timer {
     interval: Duration,
@@ -355,81 +376,184 @@ pub(crate) fn start(
     events: mpsc::Sender<RuntimeEvent>,
     accepting: Arc<AtomicBool>,
 ) -> Result<RuntimeHandle, DriverError> {
-    let (sender, mut receiver) = mpsc::channel(64);
+    let (sender, receiver) = mpsc::channel(64);
     let (ready, readiness) = oneshot::channel();
     let owner = package.manifest.id.clone();
-    std::thread::Builder::new().name(format!("lua-{owner}")).spawn(move || {
-        let runner = tokio::runtime::Builder::new_current_thread().enable_time().build();
-        let Ok(runner) = runner else { let _ = ready.send(Err(Failure::fatal(DriverError::new(ErrorCode::PluginError, "Lua executor initialization failed.")))); return; };
-        let local = tokio::task::LocalSet::new();
-        runner.block_on(local.run_until(async move {
-            let mut vm = match Vm::initialize(package, packages, registry, settings).await {
-                Ok(vm) => { let _ = ready.send(Ok(())); vm }
-                Err(failure) => {
-                    let _ = ready.send(Err(failure.clone()));
-                    while let Some(command) = receiver.recv().await {
-                        match command {
-                            RuntimeCommand::Discover { reply, .. } => { let _ = reply.send(Err(failure.clone())); }
-                            RuntimeCommand::Shutdown { reply, .. } => { let _ = reply.send(Ok(())); break; }
-                            _ => {}
-                        }
-                    }
-                    return;
-                }
+    std::thread::Builder::new()
+        .name(format!("lua-{owner}"))
+        .spawn(move || {
+            let runner = tokio::runtime::Builder::new_current_thread()
+                .enable_time()
+                .build();
+            let Ok(runner) = runner else {
+                let _ = ready.send(Err(Failure::fatal(DriverError::new(
+                    ErrorCode::PluginError,
+                    "Lua executor initialization failed.",
+                ))));
+                return;
             };
-            let mut quarantined = None;
-            loop {
-                // Due observations are considered before every command, not only when the mailbox empties.
-                if quarantined.is_none() && accepting.load(Ordering::SeqCst) {
-                    if let Some((id, sequence, result)) = vm.observe_due().await {
-                        let epoch = vm.active.get(&id).map_or(0, |active| active.grant.epoch);
-                        if let Err(failure) = &result { if failure.fatal { quarantined = Some(failure.clone()); vm.revoke(); } }
-                        let event = RuntimeEvent { owner: owner.clone(), id, epoch, sequence, result };
-                        if event.result.as_ref().is_err_and(|failure| failure.fatal) { let _ = events.send(event).await; } else { let _ = events.try_send(event); }
-                    }
-                }
-                let wake = vm.next_wake();
-                let command = tokio::select! {
-                    command = receiver.recv() => match command { Some(command) => command, None => break },
-                    _ = tokio::time::sleep_until(wake.into()), if quarantined.is_none() && accepting.load(Ordering::SeqCst) => continue,
-                };
-                match command {
-                    RuntimeCommand::Discover { guard, reply } => {
-                        let result = match &quarantined { Some(failure) => Err(failure.clone()), None => vm.discovery(guard).await };
-                        if let Err(failure) = &result { if failure.fatal { quarantined = Some(failure.clone()); vm.revoke(); } }
-                        let _ = reply.send(result);
-                    }
-                    RuntimeCommand::Activate { serial, grant, reply } => {
-                        let result = match &quarantined { Some(failure) => Err(failure.clone()), None => vm.activate(serial, grant).await };
-                        if let Err(failure) = &result { if failure.fatal { quarantined = Some(failure.clone()); vm.revoke(); } }
-                        let _ = reply.send(result);
-                    }
-                    RuntimeCommand::Retire { id, deadline, reply } => {
-                        let result = vm.retire(&id, deadline).await;
-                        if let Err(failure) = &result { if failure.fatal { quarantined = Some(failure.clone()); vm.revoke(); } }
-                        let _ = reply.send(result);
-                    }
-                    RuntimeCommand::Write { id, characteristic, command, grant, reads, writes, guard, cancellation, current, reply } => {
-                        // A queued command must not hold gates needed by observations checked before dequeue.
-                        let result = match &quarantined {
-                            Some(failure) => Err(failure.clone()),
-                            None => vm.admitted_write(&id, &characteristic, command, grant, reads, writes, guard, cancellation, current, &accepting).await,
-                        };
-                        if let Err(failure) = &result { if failure.fatal { quarantined = Some(failure.clone()); vm.revoke(); } }
-                        let _ = reply.send(result);
-                    }
-                    RuntimeCommand::Shutdown { deadline, reply } => {
-                        let result = vm.shutdown(deadline).await; let _ = reply.send(result); break;
-                    }
-                }
-            }
-            vm.revoke();
-        }));
-    }).map_err(|_| DriverError::new(ErrorCode::PluginError, "Lua runtime thread could not start."))?;
+            let local = tokio::task::LocalSet::new();
+            runner.block_on(local.run_until(run_vm(
+                package, packages, registry, settings, events, accepting, receiver, ready, owner,
+            )));
+        })
+        .map_err(|_| {
+            DriverError::new(
+                ErrorCode::PluginError,
+                "Lua runtime thread could not start.",
+            )
+        })?;
     Ok(RuntimeHandle {
         sender,
         ready: Some(readiness),
     })
+}
+#[allow(clippy::too_many_arguments)]
+async fn run_vm(
+    package: Package,
+    packages: BTreeMap<String, Package>,
+    registry: CapabilityRegistry,
+    settings: Json,
+    events: mpsc::Sender<RuntimeEvent>,
+    accepting: Arc<AtomicBool>,
+    mut receiver: mpsc::Receiver<RuntimeCommand>,
+    ready: oneshot::Sender<Result<(), Failure>>,
+    owner: String,
+) {
+    let mut vm = match Vm::initialize(package, packages, registry, settings).await {
+        Ok(vm) => {
+            let _ = ready.send(Ok(()));
+            vm
+        }
+        Err(failure) => {
+            let _ = ready.send(Err(failure.clone()));
+            while let Some(command) = receiver.recv().await {
+                match command {
+                    RuntimeCommand::Discover { reply, .. } => {
+                        let _ = reply.send(Err(failure.clone()));
+                    }
+                    RuntimeCommand::Shutdown { reply, .. } => {
+                        let _ = reply.send(Ok(()));
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+            return;
+        }
+    };
+    let mut quarantined = None;
+    loop {
+        // Due observations are considered before every command, not only when the mailbox empties.
+        if quarantined.is_none()
+            && accepting.load(Ordering::SeqCst)
+            && let Some((id, sequence, result)) = vm.observe_due().await
+        {
+            let epoch = vm.active.get(&id).map_or(0, |active| active.grant.epoch());
+            latch_failure(&mut quarantined, &mut vm, &result);
+            let event = RuntimeEvent {
+                owner: owner.clone(),
+                id,
+                epoch,
+                sequence,
+                result,
+            };
+            if event.result.as_ref().is_err_and(|failure| failure.fatal) {
+                let _ = events.send(event).await;
+            } else {
+                let _ = events.try_send(event);
+            }
+        }
+        let wake = vm.next_wake();
+        let command = tokio::select! {
+            command = receiver.recv() => match command {
+                Some(command) => command,
+                None => break,
+            },
+            _ = tokio::time::sleep_until(wake.into()), if quarantined.is_none() && accepting.load(Ordering::SeqCst) => {
+                continue;
+            }
+        };
+        match command {
+            RuntimeCommand::Discover { guard, reply } => {
+                let result = match &quarantined {
+                    Some(failure) => Err(failure.clone()),
+                    None => vm.discovery(guard).await,
+                };
+                latch_failure(&mut quarantined, &mut vm, &result);
+                let _ = reply.send(result);
+            }
+            RuntimeCommand::Activate {
+                serial,
+                grant,
+                reply,
+            } => {
+                let result = match &quarantined {
+                    Some(failure) => Err(failure.clone()),
+                    None => vm.activate(serial, grant).await,
+                };
+                latch_failure(&mut quarantined, &mut vm, &result);
+                let _ = reply.send(result);
+            }
+            RuntimeCommand::Retire {
+                id,
+                deadline,
+                reply,
+            } => {
+                let result = vm.retire(&id, deadline).await;
+                latch_failure(&mut quarantined, &mut vm, &result);
+                let _ = reply.send(result);
+            }
+            RuntimeCommand::Write {
+                id,
+                characteristic,
+                command,
+                grant,
+                reads,
+                writes,
+                guard,
+                cancellation,
+                current,
+                reply,
+            } => {
+                // A queued command must not hold gates needed by observations checked before dequeue.
+                let result = match &quarantined {
+                    Some(failure) => Err(failure.clone()),
+                    None => {
+                        vm.admitted_write(
+                            &id,
+                            &characteristic,
+                            command,
+                            grant,
+                            reads,
+                            writes,
+                            guard,
+                            cancellation,
+                            current,
+                            &accepting,
+                        )
+                        .await
+                    }
+                };
+                latch_failure(&mut quarantined, &mut vm, &result);
+                let _ = reply.send(result);
+            }
+            RuntimeCommand::Shutdown { deadline, reply } => {
+                let result = vm.shutdown(deadline).await;
+                let _ = reply.send(result);
+                break;
+            }
+        }
+    }
+    vm.revoke();
+}
+fn latch_failure<T>(quarantined: &mut Option<Failure>, vm: &mut Vm, result: &Result<T, Failure>) {
+    if let Err(failure) = result
+        && failure.fatal
+    {
+        *quarantined = Some(failure.clone());
+        vm.revoke();
+    }
 }
 impl Vm {
     async fn initialize(
@@ -544,7 +668,7 @@ impl Vm {
                 self.active
                     .values()
                     .find(|active| {
-                        active.grant.epoch == operation.epoch()
+                        active.grant.epoch() == operation.epoch()
                             && active.device.id == operation.device()
                     })
                     .map_or_else(Vec::new, |active| active.grant.endpoints().to_vec())
@@ -605,7 +729,7 @@ impl Vm {
         let poll_at = definition
             .candidate
             .poll_ms
-            .map(|ms| Instant::now() + Duration::from_millis(ms as u64));
+            .map(|ms| Instant::now() + Duration::from_millis(u64::from(ms)));
         self.active.insert(
             id.clone(),
             Active {
@@ -631,7 +755,8 @@ impl Vm {
         };
         let result = async {
             if let Some(start) = self.active[&id].definition.start.clone() {
-                self.callback(&id, start, &operation, false, false).await?;
+                self.callback(&id, start, &operation, CallbackKind::Observe)
+                    .await?;
             }
             self.refresh(&id, &operation).await
         }
@@ -641,10 +766,10 @@ impl Vm {
         }
         operation.finish();
         if result.is_err() {
-            if let Err(failure) = self.retire(&id, operation.deadline()).await {
-                if failure.fatal {
-                    return Err(failure);
-                }
+            if let Err(failure) = self.retire(&id, operation.deadline()).await
+                && failure.fatal
+            {
+                return Err(failure);
             }
         } else {
             let active = self.active.get_mut(&id).expect("activated device");
@@ -652,7 +777,7 @@ impl Vm {
                 .definition
                 .candidate
                 .poll_ms
-                .map(|ms| Instant::now() + Duration::from_millis(ms as u64));
+                .map(|ms| Instant::now() + Duration::from_millis(u64::from(ms)));
         }
         result
     }
@@ -678,11 +803,10 @@ impl Vm {
         id: &str,
         function: Function,
         operation: &OperationContext,
-        write: bool,
-        refresh: bool,
+        kind: CallbackKind<'_>,
     ) -> Result<Value, Failure> {
         let guard = InvocationGuard::new(operation.deadline());
-        self.callback_with_guard(id, function, operation, write, refresh, guard, None, None)
+        self.callback_with_guard(id, function, operation, kind, guard)
             .await
     }
     async fn callback_with_guard(
@@ -690,12 +814,10 @@ impl Vm {
         id: &str,
         function: Function,
         operation: &OperationContext,
-        write: bool,
-        refresh: bool,
+        kind: CallbackKind<'_>,
         guard: Arc<InvocationGuard>,
-        command: Option<(&str, CharacteristicCommand)>,
-        event: Option<Json>,
     ) -> Result<Value, Failure> {
+        let write = kind.is_write();
         let mut invocation = self.context(
             Some(if write {
                 operation.clone()
@@ -712,6 +834,54 @@ impl Vm {
                 .install(&self.lua, &self.package.manifest, invocation.clone())?,
         )?;
         let published = Rc::new(RefCell::new(Vec::<Value>::new()));
+        self.install_publish(&context, &guard, write, &published)?;
+        let registered = Rc::new(RefCell::new(Vec::<Timer>::new()));
+        self.install_every(id, &context, &guard, write, &registered)?;
+        let subscriptions = Rc::new(RefCell::new(Vec::<Subscription>::new()));
+        self.install_subscribe(id, &context, invocation, &guard, write, &subscriptions)?;
+        let result = match &kind {
+            CallbackKind::Write {
+                characteristic,
+                command,
+            } => {
+                guarded(
+                    &self.budget,
+                    guard.clone(),
+                    function.call_async::<Value>((
+                        context,
+                        *characteristic,
+                        self.lua.to_value(command)?,
+                    )),
+                )
+                .await
+            }
+            CallbackKind::Event(event) => {
+                guarded(
+                    &self.budget,
+                    guard.clone(),
+                    function.call_async::<Value>((context, self.lua.to_value(event)?)),
+                )
+                .await
+            }
+            CallbackKind::Observe | CallbackKind::Refresh | CallbackKind::Stop => {
+                guarded(
+                    &self.budget,
+                    guard.clone(),
+                    function.call_async::<Value>(context),
+                )
+                .await
+            }
+        };
+        guard.close();
+        self.apply_result(id, result?, &kind, published, registered, subscriptions)
+    }
+    fn install_publish(
+        &self,
+        context: &Table,
+        guard: &Arc<InvocationGuard>,
+        write: bool,
+        published: &Rc<RefCell<Vec<Value>>>,
+    ) -> Result<(), Failure> {
         let staged = published.clone();
         let publish_guard = guard.clone();
         context.raw_set(
@@ -726,7 +896,16 @@ impl Vm {
                 Ok(())
             })?,
         )?;
-        let registered = Rc::new(RefCell::new(Vec::<Timer>::new()));
+        Ok(())
+    }
+    fn install_every(
+        &self,
+        id: &str,
+        context: &Table,
+        guard: &Arc<InvocationGuard>,
+        write: bool,
+        registered: &Rc<RefCell<Vec<Timer>>>,
+    ) -> Result<(), Failure> {
         let timers = registered.clone();
         let timer_guard = guard.clone();
         let existing = self.active[id].timers.len();
@@ -741,8 +920,8 @@ impl Vm {
                     }
                     let cancelled = Arc::new(AtomicBool::new(false));
                     timers.borrow_mut().push(Timer {
-                        interval: Duration::from_millis(ms as u64),
-                        next: Instant::now() + Duration::from_millis(ms as u64),
+                        interval: Duration::from_millis(u64::from(ms)),
+                        next: Instant::now() + Duration::from_millis(u64::from(ms)),
                         callback,
                         cancelled: cancelled.clone(),
                     });
@@ -757,7 +936,17 @@ impl Vm {
                     Ok(handle)
                 })?,
         )?;
-        let subscriptions = Rc::new(RefCell::new(Vec::<Subscription>::new()));
+        Ok(())
+    }
+    fn install_subscribe(
+        &self,
+        id: &str,
+        context: &Table,
+        invocation: InvocationContext,
+        guard: &Arc<InvocationGuard>,
+        write: bool,
+        subscriptions: &Rc<RefCell<Vec<Subscription>>>,
+    ) -> Result<(), Failure> {
         let staged_subscriptions = subscriptions.clone();
         let subscribe_guard = guard.clone();
         let factories = self.registry.clone();
@@ -830,34 +1019,19 @@ impl Vm {
                 },
             )?,
         )?;
-        let result = if let Some((characteristic, command)) = command {
-            guarded(
-                &self.budget,
-                guard.clone(),
-                function.call_async::<Value>((
-                    context,
-                    characteristic,
-                    self.lua.to_value(&command)?,
-                )),
-            )
-            .await
-        } else if let Some(event) = event {
-            guarded(
-                &self.budget,
-                guard.clone(),
-                function.call_async::<Value>((context, self.lua.to_value(&event)?)),
-            )
-            .await
-        } else {
-            guarded(
-                &self.budget,
-                guard.clone(),
-                function.call_async::<Value>(context),
-            )
-            .await
-        };
-        guard.close();
-        let value = result?;
+        Ok(())
+    }
+    fn apply_result(
+        &mut self,
+        id: &str,
+        value: Value,
+        kind: &CallbackKind<'_>,
+        published: Rc<RefCell<Vec<Value>>>,
+        registered: Rc<RefCell<Vec<Timer>>>,
+        subscriptions: Rc<RefCell<Vec<Subscription>>>,
+    ) -> Result<Value, Failure> {
+        let refresh = kind.is_refresh();
+        let write = kind.is_write();
         if !matches!(value, Value::Nil) {
             let table = object(
                 value.clone(),
@@ -911,7 +1085,10 @@ impl Vm {
     }
     async fn refresh(&mut self, id: &str, operation: &OperationContext) -> Result<Device, Failure> {
         let refresh = self.active[id].definition.refresh.clone();
-        match self.callback(id, refresh, operation, false, true).await {
+        match self
+            .callback(id, refresh, operation, CallbackKind::Refresh)
+            .await
+        {
             Ok(_) => {
                 let active = self.active.get_mut(id).ok_or_else(invalid)?;
                 active.device.status = DeviceStatus::Online;
@@ -924,6 +1101,7 @@ impl Vm {
             }
         }
     }
+    #[allow(clippy::too_many_arguments)]
     async fn admitted_write(
         &mut self,
         id: &str,
@@ -973,7 +1151,7 @@ impl Vm {
         let result = self
             .write(
                 id,
-                grant.epoch,
+                grant.epoch(),
                 characteristic,
                 command,
                 operation.clone(),
@@ -1001,7 +1179,7 @@ impl Vm {
                 "Device handler has retired.",
             ))
         })?;
-        if active.grant.epoch != epoch || !active.grant.is_active() {
+        if active.grant.epoch() != epoch || !active.grant.is_active() {
             return Err(Failure::operation(DriverError::new(
                 ErrorCode::DeviceUnavailable,
                 "Device handler has retired.",
@@ -1018,27 +1196,27 @@ impl Vm {
                 id,
                 function,
                 &operation,
-                true,
-                false,
+                CallbackKind::Write {
+                    characteristic,
+                    command: command.clone(),
+                },
                 guard.clone(),
-                Some((characteristic, command.clone())),
-                None,
             )
             .await;
         if let Err(failure) = result {
             self.mark_failed(id, &failure.error);
             return Err(failure);
         }
-        if !matches!(command, CharacteristicCommand::Invoke {}) {
-            if let Some(selected) = self.active.get_mut(id).and_then(|active| {
+        if !matches!(command, CharacteristicCommand::Invoke {})
+            && let Some(selected) = self.active.get_mut(id).and_then(|active| {
                 active
                     .device
                     .characteristics
                     .iter_mut()
                     .find(|item| item.id == characteristic)
-            }) {
-                selected.status = CharacteristicStatus::Unavailable;
-            }
+            })
+        {
+            selected.status = CharacteristicStatus::Unavailable;
         }
         let device = self.refresh(id, &operation).await?;
         if !matches!(command, CharacteristicCommand::Invoke {})
@@ -1090,6 +1268,15 @@ impl Vm {
     }
     async fn observe_due(&mut self) -> Option<(String, u64, Result<Device, Failure>)> {
         let now = Instant::now();
+        self.prune_scheduled_work();
+        if !self.has_due_timer_or_poll(now)
+            && let Some((id, callback, event)) = self.take_subscription_event()
+        {
+            return Some(self.observe_subscription(id, callback, event, now).await);
+        }
+        self.observe_timer_or_poll(now).await
+    }
+    fn prune_scheduled_work(&mut self) {
         for active in self.active.values_mut() {
             if !active.grant.is_active() {
                 active.poll_at = None;
@@ -1104,65 +1291,67 @@ impl Vm {
                 .subscriptions
                 .retain(|subscription| !subscription.stream.cancelled.load(Ordering::SeqCst));
         }
-        let due = self.active.values().any(|active| {
+    }
+    fn has_due_timer_or_poll(&self, now: Instant) -> bool {
+        self.active.values().any(|active| {
             active.poll_at.is_some_and(|at| at <= now)
                 || active.timers.iter().any(|timer| timer.next <= now)
-        });
-        let event = if due {
-            None
-        } else {
-            self.active.iter_mut().find_map(|(id, active)| {
-                active.subscriptions.iter_mut().find_map(|subscription| {
-                    subscription
-                        .stream
-                        .receiver
-                        .try_recv()
-                        .ok()
-                        .map(|event| (id.clone(), subscription.callback.clone(), event))
-                })
+        })
+    }
+    fn take_subscription_event(&mut self) -> Option<(String, Function, Json)> {
+        self.active.iter_mut().find_map(|(id, active)| {
+            active.subscriptions.iter_mut().find_map(|subscription| {
+                subscription
+                    .stream
+                    .receiver
+                    .try_recv()
+                    .ok()
+                    .map(|event| (id.clone(), subscription.callback.clone(), event))
             })
-        };
-        if let Some((id, callback, event)) = event {
-            let operation = match self.read_operation(&id, now + CALLBACK_LIMIT).await {
-                Ok(operation) => operation,
-                Err(failure) => {
-                    self.mark_failed(&id, &failure.error);
-                    return Some((id, 0, Err(failure)));
-                }
-            };
-            let guard = InvocationGuard::new(operation.deadline());
-            let exchanged = self
-                .lua
-                .to_value(&event)
-                .map_err(Failure::from)
-                .and_then(json)
-                .and_then(|event| {
-                    synapsed_api::validate_encoded_size(&event, 16 * 1024)?;
-                    Ok(event)
-                });
-            let result = match exchanged {
-                Ok(event) => self
-                    .callback_with_guard(
-                        &id,
-                        callback,
-                        &operation,
-                        false,
-                        false,
-                        guard,
-                        None,
-                        Some(event),
-                    )
-                    .await
-                    .map(|_| self.active[&id].device.clone()),
-                Err(failure) => Err(failure),
-            };
-            if let Err(failure) = &result {
+        })
+    }
+    async fn observe_subscription(
+        &mut self,
+        id: String,
+        callback: Function,
+        event: Json,
+        now: Instant,
+    ) -> (String, u64, Result<Device, Failure>) {
+        let operation = match self.read_operation(&id, now + CALLBACK_LIMIT).await {
+            Ok(operation) => operation,
+            Err(failure) => {
                 self.mark_failed(&id, &failure.error);
-                operation.cancel();
+                return (id, 0, Err(failure));
             }
-            operation.finish();
-            return Some((id, operation.sequence(), result));
+        };
+        let guard = InvocationGuard::new(operation.deadline());
+        let exchanged = self
+            .lua
+            .to_value(&event)
+            .map_err(Failure::from)
+            .and_then(json)
+            .and_then(|event| {
+                synapsed_api::validate_encoded_size(&event, 16 * 1024)?;
+                Ok(event)
+            });
+        let result = match exchanged {
+            Ok(event) => self
+                .callback_with_guard(&id, callback, &operation, CallbackKind::Event(event), guard)
+                .await
+                .map(|_| self.active[&id].device.clone()),
+            Err(failure) => Err(failure),
+        };
+        if let Err(failure) = &result {
+            self.mark_failed(&id, &failure.error);
+            operation.cancel();
         }
+        operation.finish();
+        (id, operation.sequence(), result)
+    }
+    async fn observe_timer_or_poll(
+        &mut self,
+        now: Instant,
+    ) -> Option<(String, u64, Result<Device, Failure>)> {
         let id = self
             .active
             .iter()
@@ -1200,33 +1389,9 @@ impl Vm {
             .poll_at
             .is_some_and(|at| at <= now && timer_at.is_none_or(|timer| at <= timer));
         let result = if poll {
-            let ms = self.active[&id]
-                .definition
-                .candidate
-                .poll_ms
-                .expect("poll interval");
-            let result = self.refresh(&id, &operation).await;
-            self.active.get_mut(&id).expect("active device").poll_at =
-                Some(Instant::now() + Duration::from_millis(ms as u64));
-            result
+            self.observe_poll(&id, &operation).await
         } else {
-            let index = self.active[&id]
-                .timers
-                .iter()
-                .enumerate()
-                .filter(|(_, timer)| timer.next <= now && !timer.cancelled.load(Ordering::SeqCst))
-                .min_by_key(|(_, timer)| timer.next)
-                .map(|(index, _)| index)
-                .expect("due timer");
-            let callback = self.active[&id].timers[index].callback.clone();
-            let interval = self.active[&id].timers[index].interval;
-            let result = self
-                .callback(&id, callback, &operation, false, false)
-                .await
-                .map(|_| self.active[&id].device.clone());
-            self.active.get_mut(&id).expect("active device").timers[index].next =
-                Instant::now() + interval;
-            result
+            self.observe_timer(&id, &operation, now).await
         };
         if let Err(failure) = &result {
             self.mark_failed(&id, &failure.error);
@@ -1234,6 +1399,45 @@ impl Vm {
         }
         operation.finish();
         Some((id, operation.sequence(), result))
+    }
+    async fn observe_poll(
+        &mut self,
+        id: &str,
+        operation: &OperationContext,
+    ) -> Result<Device, Failure> {
+        let ms = self.active[id]
+            .definition
+            .candidate
+            .poll_ms
+            .expect("poll interval");
+        let result = self.refresh(id, operation).await;
+        self.active.get_mut(id).expect("active device").poll_at =
+            Some(Instant::now() + Duration::from_millis(u64::from(ms)));
+        result
+    }
+    async fn observe_timer(
+        &mut self,
+        id: &str,
+        operation: &OperationContext,
+        now: Instant,
+    ) -> Result<Device, Failure> {
+        let index = self.active[id]
+            .timers
+            .iter()
+            .enumerate()
+            .filter(|(_, timer)| timer.next <= now && !timer.cancelled.load(Ordering::SeqCst))
+            .min_by_key(|(_, timer)| timer.next)
+            .map(|(index, _)| index)
+            .expect("due timer");
+        let callback = self.active[id].timers[index].callback.clone();
+        let interval = self.active[id].timers[index].interval;
+        let result = self
+            .callback(id, callback, operation, CallbackKind::Observe)
+            .await
+            .map(|_| self.active[id].device.clone());
+        self.active.get_mut(id).expect("active device").timers[index].next =
+            Instant::now() + interval;
+        result
     }
     async fn retire(&mut self, id: &str, deadline: Instant) -> Result<(), Failure> {
         let Some(active) = self.active.get(id) else {
@@ -1249,7 +1453,7 @@ impl Vm {
             {
                 Ok(operation) => {
                     let result = self
-                        .callback(id, stop, &operation, true, false)
+                        .callback(id, stop, &operation, CallbackKind::Stop)
                         .await
                         .map(|_| ());
                     if result.is_err() {
@@ -1431,7 +1635,11 @@ fn array(value: Value) -> Result<Vec<Value>, Failure> {
     let mut count = 0;
     for item in table.clone().pairs::<Value, Value>() {
         let (key, _) = item?;
-        if !matches!(key, Value::Integer(index) if index > 0 && index as usize <= length) {
+        if !matches!(
+            key,
+            Value::Integer(index)
+                if index > 0 && usize::try_from(index).is_ok_and(|index| index <= length)
+        ) {
             return Err(invalid().into());
         }
         count += 1;
@@ -1468,7 +1676,7 @@ fn plain(
             Ok(Json::String(string))
         }
         Value::Table(table) => {
-            let pointer = table.to_pointer() as usize;
+            let pointer = table.to_pointer().addr();
             if table.metatable().is_some() || !seen.insert(pointer) {
                 return Err(invalid().into());
             }
@@ -1568,80 +1776,8 @@ fn parse_definition(
     if poll_ms.is_some_and(|ms| ms < 500) {
         return Err(invalid().into());
     }
-    let mut characteristics = Vec::new();
-    let mut writes = BTreeMap::new();
-    for value in array(table.raw_get("characteristics")?)? {
-        let characteristic = object(value, &["id", "label", "spec", "access", "writes"])?;
-        let spec_table: Value = characteristic.raw_get("spec")?;
-        let Value::Table(spec_object) = &spec_table else {
-            return Err(invalid().into());
-        };
-        let kind: String = decode(spec_object.raw_get("kind")?)?;
-        object(
-            spec_table.clone(),
-            match kind.as_str() {
-                "number" => &["kind", "minimum", "maximum", "step", "integer", "unit"],
-                "boolean" | "action" => &["kind"],
-                "enum" => &["kind", "options"],
-                "string" => &["kind", "maxLength"],
-                _ => return Err(invalid().into()),
-            },
-        )?;
-        if kind == "enum" {
-            for option in array(spec_object.raw_get("options")?)? {
-                object(option, &["value", "label"])?;
-            }
-        }
-        let access: CharacteristicAccess = decode(Value::Table(object(
-            characteristic.raw_get("access")?,
-            &["read", "write", "notify"],
-        )?))?;
-        let spec: CharacteristicSpec = decode(spec_table)?;
-        let id: String = decode(characteristic.raw_get("id")?)?;
-        let private: Json = json(characteristic.raw_get("writes")?)?;
-        let private = private.as_object().ok_or_else(invalid)?;
-        let mut bindings = BTreeMap::new();
-        for (capability, value) in private {
-            let value = if value.as_object().is_some_and(|object| object.is_empty()) {
-                Json::Array(vec![])
-            } else {
-                value.clone()
-            };
-            let permissions = package
-                .manifest
-                .permissions
-                .get(capability)
-                .ok_or_else(invalid)?;
-            let accepted = registry
-                .factory(capability)?
-                .validate_bindings(permissions, &value)?;
-            for (code, mask) in accepted {
-                if bindings.insert(code, mask).is_some() {
-                    return Err(invalid().into());
-                }
-            }
-        }
-        if !access.write && !private.is_empty() {
-            return Err(invalid().into());
-        }
-        if writes.insert(id.clone(), bindings).is_some() {
-            return Err(invalid().into());
-        }
-        let status = if matches!(spec, CharacteristicSpec::Action) {
-            CharacteristicStatus::Ok
-        } else {
-            CharacteristicStatus::Unavailable
-        };
-        characteristics.push(Characteristic {
-            id,
-            label: decode(characteristic.raw_get("label")?)?,
-            spec,
-            access,
-            value: None,
-            status,
-            error: None,
-        });
-    }
+    let (characteristics, writes) =
+        parse_characteristics(table.raw_get("characteristics")?, package, registry)?;
     let device = Device {
         id: decode(table.raw_get("id")?)?,
         driver: package.manifest.id.clone(),
@@ -1675,6 +1811,101 @@ fn parse_definition(
         write,
         stop: table.raw_get("onStop")?,
     })
+}
+fn parse_characteristics(
+    value: Value,
+    package: &Package,
+    registry: &CapabilityRegistry,
+) -> Result<ParsedCharacteristics, Failure> {
+    let mut characteristics = Vec::new();
+    let mut writes = BTreeMap::new();
+    for value in array(value)? {
+        let characteristic = object(value, &["id", "label", "spec", "access", "writes"])?;
+        let spec_table: Value = characteristic.raw_get("spec")?;
+        let Value::Table(spec_object) = &spec_table else {
+            return Err(invalid().into());
+        };
+        let kind: String = decode(spec_object.raw_get("kind")?)?;
+        object(
+            spec_table.clone(),
+            match kind.as_str() {
+                "number" => &["kind", "minimum", "maximum", "step", "integer", "unit"],
+                "boolean" | "action" => &["kind"],
+                "enum" => &["kind", "options"],
+                "string" => &["kind", "maxLength"],
+                _ => return Err(invalid().into()),
+            },
+        )?;
+        if kind == "enum" {
+            for option in array(spec_object.raw_get("options")?)? {
+                object(option, &["value", "label"])?;
+            }
+        }
+        let access: CharacteristicAccess = decode(Value::Table(object(
+            characteristic.raw_get("access")?,
+            &["read", "write", "notify"],
+        )?))?;
+        let spec: CharacteristicSpec = decode(spec_table)?;
+        let id: String = decode(characteristic.raw_get("id")?)?;
+        let bindings = parse_write_bindings(
+            characteristic.raw_get("writes")?,
+            access.write,
+            package,
+            registry,
+        )?;
+        if writes.insert(id.clone(), bindings).is_some() {
+            return Err(invalid().into());
+        }
+        let status = if matches!(spec, CharacteristicSpec::Action) {
+            CharacteristicStatus::Ok
+        } else {
+            CharacteristicStatus::Unavailable
+        };
+        characteristics.push(Characteristic {
+            id,
+            label: decode(characteristic.raw_get("label")?)?,
+            spec,
+            access,
+            value: None,
+            status,
+            error: None,
+        });
+    }
+    Ok((characteristics, writes))
+}
+fn parse_write_bindings(
+    value: Value,
+    writable: bool,
+    package: &Package,
+    registry: &CapabilityRegistry,
+) -> Result<BTreeMap<u8, u16>, Failure> {
+    let private: Json = json(value)?;
+    let private = private.as_object().ok_or_else(invalid)?;
+    let mut bindings = BTreeMap::new();
+    for (capability, value) in private {
+        let value = if value.as_object().is_some_and(|object| object.is_empty()) {
+            Json::Array(vec![])
+        } else {
+            value.clone()
+        };
+        let permissions = package
+            .manifest
+            .permissions
+            .get(capability)
+            .ok_or_else(invalid)?;
+        let accepted = registry
+            .factory(capability)?
+            .validate_bindings(permissions, &value)?;
+        for (code, mask) in accepted {
+            if bindings.insert(code, mask).is_some() {
+                return Err(invalid().into());
+            }
+        }
+    }
+    if !writable && !private.is_empty() {
+        return Err(invalid().into());
+    }
+    Ok(bindings)
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]

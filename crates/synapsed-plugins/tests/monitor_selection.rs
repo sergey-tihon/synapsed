@@ -35,9 +35,9 @@ async fn monitor_selection_zero_one_multiple_and_denied() {
                 .state
                 .lock()
                 .unwrap()
-                .reads
+                .get_calls
                 .iter()
-                .all(|code| *code == 16)
+                .all(|call| call.1 == 16)
         );
         harness.stop().await;
     }
@@ -116,7 +116,7 @@ async fn monitor_selection_conflict_never_activates_writer() {
         .await
         .unwrap_err();
     assert_eq!(error.code, ErrorCode::DeviceUnavailable);
-    assert!(harness.hardware.state.lock().unwrap().writes.is_empty());
+    assert!(harness.hardware.state.lock().unwrap().set_calls.is_empty());
     harness.stop().await;
 }
 #[tokio::test(flavor = "current_thread")]
@@ -132,13 +132,13 @@ async fn monitor_selection_same_identity_restores_but_changed_or_missing_does_no
                 })
             })
             .await;
-        let old = hardware.state.lock().unwrap().screens.remove(0);
+        let old = hardware.state.lock().unwrap().endpoints.remove(0);
         harness.until(|snapshot| snapshot.devices.is_empty()).await;
         let mut new = old;
         if changed {
             new.identity = Some("b".repeat(64));
         }
-        hardware.state.lock().unwrap().screens.push(new);
+        hardware.state.lock().unwrap().endpoints.push(new);
         let snapshot = harness.until(|snapshot| !snapshot.devices.is_empty()).await;
         assert_eq!(
             snapshot.devices[0].status,
@@ -163,9 +163,9 @@ async fn monitor_selection_same_identity_restores_but_changed_or_missing_does_no
                 .is_some_and(|device| device.driver == "benq-rd280u")
         })
         .await;
-    let screen = hardware.state.lock().unwrap().screens.remove(0);
+    let screen = hardware.state.lock().unwrap().endpoints.remove(0);
     harness.until(|snapshot| snapshot.devices.is_empty()).await;
-    hardware.state.lock().unwrap().screens.push(screen);
+    hardware.state.lock().unwrap().endpoints.push(screen);
     harness
         .until(|snapshot| {
             snapshot
@@ -308,10 +308,11 @@ async fn monitor_selection_multi_endpoint_claim_never_gets_a_partial_grant() {
         .dispatch("left", "level", CharacteristicCommand::Step { steps: 1 })
         .await
         .unwrap();
-    let state = harness.hardware.state.lock().unwrap();
-    assert_eq!(state.writes.len(), 1);
-    assert_eq!(state.screens[1].values[&16].current, 40);
-    drop(state);
+    {
+        let state = harness.hardware.state.lock().unwrap();
+        assert_eq!(state.set_calls.len(), 1);
+        assert_eq!(state.endpoints[1].replies[&16].current, 40);
+    }
     harness.stop().await;
 }
 
@@ -356,7 +357,7 @@ async fn monitor_selection_distinct_endpoints_with_same_public_id_conflict() {
             .code,
         ErrorCode::DeviceUnavailable
     );
-    assert!(harness.hardware.state.lock().unwrap().writes.is_empty());
+    assert!(harness.hardware.state.lock().unwrap().set_calls.is_empty());
     harness.stop().await;
 }
 
@@ -365,16 +366,16 @@ async fn monitor_selection_slot_rebinds_changed_identity_after_fresh_observation
     let packages = catalog(&["generic-ddc"]);
     let harness = Harness::start(packages.path(), Hardware::new(vec![Screen::benq()]));
     harness.until(|snapshot| !snapshot.devices.is_empty()).await;
-    let mut replacement = harness.hardware.state.lock().unwrap().screens.remove(0);
+    let mut replacement = harness.hardware.state.lock().unwrap().endpoints.remove(0);
     harness.until(|snapshot| snapshot.devices.is_empty()).await;
     replacement.identity = Some("b".repeat(64));
-    replacement.values.get_mut(&16).unwrap().current = 55;
+    replacement.replies.get_mut(&16).unwrap().current = 55;
     harness
         .hardware
         .state
         .lock()
         .unwrap()
-        .screens
+        .endpoints
         .push(replacement);
     let snapshot = harness
         .until(|snapshot| {
@@ -391,9 +392,9 @@ async fn monitor_selection_slot_rebinds_changed_identity_after_fresh_observation
             .state
             .lock()
             .unwrap()
-            .reads
+            .get_calls
             .iter()
-            .all(|code| *code == 16)
+            .all(|call| call.1 == 16)
     );
     harness.stop().await;
 }

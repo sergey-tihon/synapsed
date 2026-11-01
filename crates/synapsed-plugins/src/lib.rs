@@ -1,19 +1,15 @@
 //! Trusted installed Lua device packages. Rust owns transport grants, never device policy.
-pub mod loader;
-pub mod manifest;
-pub mod registry;
-pub mod runtime;
+mod loader;
+mod manifest;
+mod registry;
+mod runtime;
 pub mod capabilities {
     pub mod ddc;
 }
 pub use registry::{CapabilityEventStream, CapabilityRegistry, LuaCapabilityFactory};
 pub use runtime::{InvocationContext, InvocationGuard};
 pub use synapsed_ddc::EndpointDescriptor;
-#[cfg(test)]
-extern crate self as synapsed_plugins;
-#[cfg(test)]
-#[path = "../tests/support/mod.rs"]
-mod test_support;
+pub use synapsed_inventory::{DriverCatalogEntry, InventoryMatch, InventoryRole};
 
 use loader::{Catalog, Package};
 use runtime::{
@@ -31,12 +27,20 @@ use std::{
     time::{Duration, Instant},
 };
 use synapsed_api::{
-    CharacteristicCommand, Device, DeviceStatus, DriverState, DriverStatus, Snapshot,
+    API_VERSION, CharacteristicCommand, Device, DeviceStatus, DriverState, DriverStatus, Snapshot,
 };
 use synapsed_core::{
     DeviceGrant, DriverError, EndpointGates, EndpointToken, ErrorCode, OperationContext, StateStore,
 };
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{Mutex as AsyncMutex, OnceCell, mpsc, oneshot, watch};
+
+pub const MAX_SETTINGS_DEPTH: usize = 8;
+pub const MAX_SETTINGS_ENTRIES: usize = 4096;
+pub const MAX_DISABLED: usize = 16;
+pub const MAX_DRIVER_SETTINGS: usize = 16;
+pub const MIN_DISCOVERY_INTERVAL_MS: u64 = 1000;
+type CandidateChoice = (String, Candidate);
+type CandidateSelection = (BTreeMap<String, CandidateChoice>, Vec<CandidateChoice>);
 
 #[derive(Clone, Debug)]
 pub struct PluginConfig {
@@ -47,8 +51,16 @@ pub struct PluginConfig {
     pub settings: BTreeMap<String, Value>,
 }
 impl PluginConfig {
-    fn validate(&self) -> Result<(), DriverError> {
-        if self.discovery_interval_ms < 1000 || self.disabled.len() > 16 || self.settings.len() > 16
+    pub fn validate(&self) -> Result<(), DriverError> {
+        self.validate_with_max_settings_entries(MAX_SETTINGS_ENTRIES)
+    }
+    pub fn validate_with_max_settings_entries(
+        &self,
+        max_settings_entries: usize,
+    ) -> Result<(), DriverError> {
+        if self.discovery_interval_ms < MIN_DISCOVERY_INTERVAL_MS
+            || self.disabled.len() > MAX_DISABLED
+            || self.settings.len() > MAX_DRIVER_SETTINGS
         {
             return Err(invalid_config());
         }
@@ -61,7 +73,8 @@ impl PluginConfig {
         }
         for (id, settings) in &self.settings {
             synapsed_api::validate_driver_id(id)?;
-            if !settings.is_object() || !bounded_settings(settings, 0, &mut 0) {
+            if !settings.is_object() || !bounded_settings(settings, 0, &mut 0, max_settings_entries)
+            {
                 return Err(invalid_config());
             }
             synapsed_api::validate_encoded_size(settings, 64 * 1024)?;
@@ -69,17 +82,17 @@ impl PluginConfig {
         Ok(())
     }
 }
-fn bounded_settings(value: &Value, depth: usize, count: &mut usize) -> bool {
+fn bounded_settings(value: &Value, depth: usize, count: &mut usize, max_entries: usize) -> bool {
     *count += 1;
-    if depth > 8 || *count > 4096 {
+    if depth > MAX_SETTINGS_DEPTH || *count > max_entries {
         return false;
     }
     match value {
         Value::Array(values) => values
             .iter()
-            .all(|value| bounded_settings(value, depth + 1, count)),
+            .all(|value| bounded_settings(value, depth + 1, count, max_entries)),
         Value::Object(values) => values.iter().all(|(key, value)| {
-            key.chars().count() <= 128 && bounded_settings(value, depth + 1, count)
+            key.chars().count() <= 128 && bounded_settings(value, depth + 1, count, max_entries)
         }),
         Value::String(value) => value.chars().count() <= 1024,
         Value::Number(value) => value.as_f64().is_some_and(f64::is_finite),
@@ -96,11 +109,45 @@ fn invalid_config() -> DriverError {
 pub struct PluginHost {
     inner: Arc<HostInner>,
 }
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Binding {
+    pub driver: String,
+    pub endpoints: Vec<EndpointToken>,
+}
+pub type Bindings = BTreeMap<String, Binding>;
+fn coordinator_initialization_error() -> DriverError {
+    DriverError::new(
+        ErrorCode::PluginError,
+        "Plugin coordinator initialization failed.",
+    )
+}
 struct HostInner {
     commands: mpsc::Sender<HostCommand>,
     accepting: Arc<AtomicBool>,
     current: Arc<Mutex<Option<OperationContext>>>,
     store: StateStore,
+    catalog: Arc<[DriverCatalogEntry]>,
+    bindings: watch::Sender<Arc<Bindings>>,
+    readiness: AsyncMutex<Option<oneshot::Receiver<Result<(), DriverError>>>>,
+    startup: OnceCell<Result<(), DriverError>>,
+}
+impl HostInner {
+    async fn await_ready(&self) -> Result<(), DriverError> {
+        self.startup
+            .get_or_init(|| async {
+                let mut readiness = self.readiness.lock().await;
+                let Some(receiver) = readiness.as_mut() else {
+                    return Err(coordinator_initialization_error());
+                };
+                let result = receiver
+                    .await
+                    .unwrap_or_else(|_| Err(coordinator_initialization_error()));
+                *readiness = None;
+                result
+            })
+            .await
+            .clone()
+    }
 }
 impl Drop for HostInner {
     fn drop(&mut self) {
@@ -158,10 +205,64 @@ enum HostCommand {
         cancellation: Arc<Cancellation>,
         reply: oneshot::Sender<Result<Arc<Snapshot>, DriverError>>,
     },
+    #[cfg(debug_assertions)]
+    DiscoveryRound { reply: oneshot::Sender<u64> },
     Shutdown {
         deadline: Instant,
         reply: oneshot::Sender<Result<(), DriverError>>,
     },
+}
+fn catalog_entries(catalog: &Catalog) -> Arc<[DriverCatalogEntry]> {
+    catalog
+        .packages
+        .values()
+        .map(|package| {
+            let inventory_matches =
+                package
+                    .manifest
+                    .inventory
+                    .as_ref()
+                    .map_or_else(Vec::new, |inventory| {
+                        let mut matches = inventory
+                            .usb
+                            .iter()
+                            .map(|entry| InventoryMatch::Usb {
+                                vendor_id: entry.vendor_id.clone(),
+                                product_id: entry.product_id.clone(),
+                                role: match entry.role {
+                                    manifest::ManifestInventoryRole::MonitorCompanion => {
+                                        InventoryRole::MonitorCompanion
+                                    }
+                                    manifest::ManifestInventoryRole::Device => {
+                                        InventoryRole::Device
+                                    }
+                                },
+                            })
+                            .collect::<Vec<_>>();
+                        matches.extend(inventory.bluetooth.iter().map(|entry| {
+                            InventoryMatch::Bluetooth {
+                                name_prefix: entry.name_prefix.clone(),
+                                role: match entry.role {
+                                    manifest::ManifestInventoryRole::MonitorCompanion => {
+                                        InventoryRole::MonitorCompanion
+                                    }
+                                    manifest::ManifestInventoryRole::Device => {
+                                        InventoryRole::Device
+                                    }
+                                },
+                            }
+                        }));
+                        matches
+                    });
+            DriverCatalogEntry {
+                id: package.manifest.id.clone(),
+                version: package.manifest.version.clone(),
+                supersedes: package.manifest.supersedes.clone(),
+                inventory_matches,
+            }
+        })
+        .collect::<Vec<_>>()
+        .into()
 }
 impl PluginHost {
     pub fn start(
@@ -174,7 +275,7 @@ impl PluginHost {
         let mut rejected = BTreeSet::new();
         loop {
             let status_snapshot = Snapshot {
-                api_version: 1,
+                api_version: API_VERSION,
                 node: store.snapshot().node.clone(),
                 revision: u64::MAX.to_string(),
                 drivers: catalog.statuses.values().cloned().collect(),
@@ -220,21 +321,30 @@ impl PluginHost {
                 }
             }
         }
+        let public_catalog = catalog_entries(&catalog);
         let (commands, receiver) = mpsc::channel(64);
+        let (binding_updates, _) = watch::channel(Arc::new(BTreeMap::new()));
+        let (ready, readiness) = oneshot::channel();
         let worker_store = store.clone();
         let accepting = Arc::new(AtomicBool::new(true));
         let current = Arc::new(Mutex::new(None));
         let worker_accepting = accepting.clone();
         let worker_current = current.clone();
+        let worker_bindings = binding_updates.clone();
         std::thread::Builder::new()
             .name("synapsed-plugins".into())
             .spawn(move || {
                 let runner = tokio::runtime::Builder::new_current_thread()
                     .enable_time()
                     .build();
-                let Ok(runner) = runner else {
-                    return;
+                let runner = match runner {
+                    Ok(runner) => runner,
+                    Err(_) => {
+                        let _ = ready.send(Err(coordinator_initialization_error()));
+                        return;
+                    }
                 };
+                let _ = ready.send(Ok(()));
                 runner.block_on(Coordinator::run(
                     worker_store,
                     config,
@@ -243,6 +353,7 @@ impl PluginHost {
                     receiver,
                     worker_accepting,
                     worker_current,
+                    worker_bindings,
                 ));
             })
             .map_err(|_| {
@@ -251,14 +362,37 @@ impl PluginHost {
                     "Plugin coordinator thread could not start.",
                 )
             })?;
+        let startup = OnceCell::<Result<(), DriverError>>::new();
+        let readiness = if tokio::runtime::Handle::try_current().is_err() {
+            let result = readiness
+                .blocking_recv()
+                .unwrap_or_else(|_| Err(coordinator_initialization_error()));
+            result?;
+            let _ = startup.set(Ok(()));
+            None
+        } else {
+            Some(readiness)
+        };
         Ok(Self {
             inner: Arc::new(HostInner {
                 commands,
                 accepting,
                 current,
                 store,
+                catalog: public_catalog,
+                bindings: binding_updates,
+                readiness: AsyncMutex::new(readiness),
+                startup,
             }),
         })
+    }
+    /// Subscribe to current published driver/device/endpoint bindings.
+    pub fn bindings(&self) -> watch::Receiver<Arc<Bindings>> {
+        self.inner.bindings.subscribe()
+    }
+    /// Return installed catalog metadata used only for passive hardware matching.
+    pub fn catalog(&self) -> Arc<[DriverCatalogEntry]> {
+        self.inner.catalog.clone()
     }
     pub async fn dispatch(
         &self,
@@ -266,6 +400,7 @@ impl PluginHost {
         characteristic: &str,
         command: CharacteristicCommand,
     ) -> Result<Arc<Snapshot>, DriverError> {
+        self.inner.await_ready().await?;
         if !self.inner.accepting.load(Ordering::SeqCst) {
             return Err(unavailable_error());
         }
@@ -301,6 +436,26 @@ impl PluginHost {
         abandonment.armed = false;
         response
     }
+    #[cfg(debug_assertions)]
+    #[doc(hidden)]
+    pub async fn complete_discovery_round_for_test(&self) -> Result<u64, DriverError> {
+        self.inner.await_ready().await?;
+        if !self.inner.accepting.load(Ordering::SeqCst) {
+            return Err(unavailable_error());
+        }
+        let (reply, receiver) = oneshot::channel();
+        self.inner
+            .commands
+            .try_send(HostCommand::DiscoveryRound { reply })
+            .map_err(|error| match error {
+                mpsc::error::TrySendError::Full(_) => busy(),
+                _ => unavailable_error(),
+            })?;
+        tokio::time::timeout(CALLBACK_LIMIT, receiver)
+            .await
+            .map_err(|_| timeout_error())?
+            .map_err(|_| unavailable_error())
+    }
     pub fn snapshot(&self) -> Arc<Snapshot> {
         self.inner.store.snapshot()
     }
@@ -315,6 +470,7 @@ impl PluginHost {
         {
             operation.cancel();
         }
+        self.inner.await_ready().await?;
         let (reply, receiver) = oneshot::channel();
         tokio::time::timeout(
             deadline.saturating_duration_since(Instant::now()),
@@ -360,8 +516,12 @@ struct Coordinator {
     last: BTreeMap<(String, String), Device>,
     dominance: BTreeMap<String, BTreeSet<String>>,
     current: Arc<Mutex<Option<OperationContext>>>,
+    binding_updates: watch::Sender<Arc<Bindings>>,
+    #[cfg(debug_assertions)]
+    discovery_round: u64,
 }
 impl Coordinator {
+    #[allow(clippy::too_many_arguments)]
     async fn run(
         store: StateStore,
         config: PluginConfig,
@@ -370,6 +530,7 @@ impl Coordinator {
         mut commands: mpsc::Receiver<HostCommand>,
         accepting: Arc<AtomicBool>,
         current: Arc<Mutex<Option<OperationContext>>>,
+        binding_updates: watch::Sender<Arc<Bindings>>,
     ) {
         let (events, mut observed) = mpsc::channel(64);
         let dominance = catalog
@@ -404,6 +565,9 @@ impl Coordinator {
             last: BTreeMap::new(),
             dominance,
             current,
+            binding_updates,
+            #[cfg(debug_assertions)]
+            discovery_round: 0,
         };
         for (id, package) in &host.packages {
             let settings = config
@@ -423,7 +587,7 @@ impl Coordinator {
                     host.runtimes.insert(id.clone(), runtime);
                 }
                 Err(error) => {
-                    let status = host.statuses.get_mut(id).expect("package status");
+                    let status = host.statuses.get_mut(id).expect("package status exists");
                     status.state = DriverState::Error;
                     status.error = Some(exposed_error(&error));
                     host.quarantined.insert(id.clone());
@@ -455,7 +619,12 @@ impl Coordinator {
         }
         host.disable_dependants().await;
         host.discover().await;
-        let mut next = Instant::now() + Duration::from_millis(config.discovery_interval_ms);
+        #[cfg(debug_assertions)]
+        host.record_discovery_round();
+        let period = Duration::from_millis(config.discovery_interval_ms);
+        let mut discovery = tokio::time::interval(period);
+        discovery.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        discovery.tick().await;
         loop {
             tokio::select! {
                 command = commands.recv() => match command {
@@ -463,19 +632,45 @@ impl Coordinator {
                         let result = host.dispatch(&device, &characteristic, command, deadline, cancellation).await;
                         let _ = reply.send(result);
                         // State events are drained before the next command, preventing command floods from starving observations.
-                        while let Ok(event) = observed.try_recv() { host.observation(event).await; }
+                        while let Ok(event) = observed.try_recv() {
+                            host.observation(event).await;
+                        }
                     }
-                    Some(HostCommand::Shutdown { deadline, reply }) => { let result = host.stop(deadline).await; let _ = reply.send(result); break; }
-                    None => { let _ = host.stop(Instant::now() + CALLBACK_LIMIT).await; break; }
+                    #[cfg(debug_assertions)]
+                    Some(HostCommand::DiscoveryRound { reply }) => {
+                        host.discover().await;
+                        while let Ok(event) = observed.try_recv() {
+                            host.observation(event).await;
+                        }
+                        let _ = reply.send(host.record_discovery_round());
+                    }
+                    Some(HostCommand::Shutdown { deadline, reply }) => {
+                        let result = host.stop(deadline).await;
+                        let _ = reply.send(result);
+                        break;
+                    }
+                    None => {
+                        let _ = host.stop(Instant::now() + CALLBACK_LIMIT).await;
+                        break;
+                    }
                 },
-                event = observed.recv(), if !observed.is_closed() => if let Some(event) = event { host.observation(event).await; },
-                _ = tokio::time::sleep_until(next.into()) => { host.discover().await; next = Instant::now() + Duration::from_millis(config.discovery_interval_ms); },
-            }
-            if Instant::now() >= next {
-                host.discover().await;
-                next = Instant::now() + Duration::from_millis(config.discovery_interval_ms);
+                event = observed.recv(), if !observed.is_closed() => {
+                    if let Some(event) = event {
+                        host.observation(event).await;
+                    }
+                }
+                _ = discovery.tick() => {
+                    host.discover().await;
+                    #[cfg(debug_assertions)]
+                    host.record_discovery_round();
+                }
             }
         }
+    }
+    #[cfg(debug_assertions)]
+    fn record_discovery_round(&mut self) -> u64 {
+        self.discovery_round = self.discovery_round.saturating_add(1);
+        self.discovery_round
     }
     async fn discover(&mut self) {
         let requests = self
@@ -519,7 +714,7 @@ impl Coordinator {
                 Ok(candidates) => {
                     self.candidates.insert(id.clone(), candidates);
                     self.failed.remove(&id);
-                    let status = self.statuses.get_mut(&id).expect("status");
+                    let status = self.status_mut(&id);
                     status.state = DriverState::Online;
                     status.error = None;
                 }
@@ -528,7 +723,7 @@ impl Coordinator {
                     if failure.fatal {
                         self.quarantine(&id, &failure.error).await;
                     } else {
-                        let status = self.statuses.get_mut(&id).expect("status");
+                        let status = self.status_mut(&id);
                         status.state = match failure.error.code {
                             ErrorCode::PermissionDenied => DriverState::PermissionDenied,
                             ErrorCode::AmbiguousDevice | ErrorCode::DriverConflict => {
@@ -543,7 +738,7 @@ impl Coordinator {
         }
         self.disable_dependants().await;
         if let Err(error) = self.arbitrate().await {
-            tracing::error!(target: "plugins", code = ?error.code, "Plugin ownership publication failed.");
+            tracing::error!(target: "synapsed::plugins", public_message = %"Plugin ownership publication failed.", code = ?error.code);
             let _ = self.publish();
         }
     }
@@ -571,7 +766,7 @@ impl Coordinator {
                     "Plugin dependency failed during initialization or execution.",
                 );
                 self.quarantine(&id, &error).await;
-                self.statuses.get_mut(&id).expect("status").state = DriverState::Disabled;
+                self.status_mut(&id).state = DriverState::Disabled;
             }
         }
     }
@@ -623,7 +818,7 @@ impl Coordinator {
     }
     fn check_snapshot(&self, devices: Vec<Device>) -> Result<(), DriverError> {
         let snapshot = Snapshot {
-            api_version: 1,
+            api_version: API_VERSION,
             node: self.store.snapshot().node.clone(),
             revision: u64::MAX.to_string(),
             drivers: self.statuses.values().cloned().collect(),
@@ -640,115 +835,8 @@ impl Coordinator {
     }
     async fn arbitrate(&mut self) -> Result<(), DriverError> {
         loop {
-            let candidates: Vec<_> = self
-                .candidates
-                .iter()
-                .filter(|(id, _)| !self.quarantined.contains(*id) && !self.failed.contains_key(*id))
-                .flat_map(|(owner, candidates)| {
-                    candidates
-                        .iter()
-                        .map(move |candidate| (owner.clone(), candidate.clone()))
-                })
-                .collect();
-            let mut endpoints = BTreeMap::<u64, BTreeSet<usize>>::new();
-            let mut ids = BTreeMap::<&str, BTreeSet<usize>>::new();
-            for (index, (_, candidate)) in candidates.iter().enumerate() {
-                ids.entry(&candidate.device.id).or_default().insert(index);
-                for endpoint in &candidate.endpoints {
-                    endpoints
-                        .entry(endpoint.token.id)
-                        .or_default()
-                        .insert(index);
-                }
-            }
-            let mut selected = BTreeSet::new();
-            for (index, (owner, candidate)) in candidates.iter().enumerate() {
-                let mut peers = ids[candidate.device.id.as_str()].clone();
-                for endpoint in &candidate.endpoints {
-                    peers.extend(&endpoints[&endpoint.token.id]);
-                }
-                peers.remove(&index);
-                let wins = peers.iter().all(|other_index| {
-                    let (other_owner, other) = &candidates[*other_index];
-                    let shared = candidate
-                        .endpoints
-                        .iter()
-                        .any(|endpoint| endpoints[&endpoint.token.id].contains(other_index));
-                    (candidate.device.id != other.device.id || shared)
-                        && self.dominance[owner].contains(other_owner)
-                });
-                if wins {
-                    selected.insert(index);
-                }
-            }
-            let mut endpoint_winners = BTreeMap::new();
-            let mut winners = BTreeMap::new();
-            for index in &selected {
-                let (owner, candidate) = &candidates[*index];
-                for endpoint in &candidate.endpoints {
-                    endpoint_winners.insert(endpoint.token.id, owner);
-                }
-                winners.insert(
-                    candidate.device.id.clone(),
-                    (owner.clone(), candidate.clone()),
-                );
-            }
-            let mut conflicts = Vec::new();
-            for (index, (owner, candidate)) in candidates.iter().enumerate() {
-                if selected.contains(&index) {
-                    continue;
-                }
-                let fully_superseded = !candidate.endpoints.is_empty()
-                    && candidate.endpoints.iter().all(|endpoint| {
-                        endpoint_winners
-                            .get(&endpoint.token.id)
-                            .is_some_and(|winner| self.dominance[*winner].contains(owner))
-                    });
-                if !fully_superseded {
-                    conflicts.push((owner.clone(), candidate.clone()));
-                }
-            }
-            // Preserve every retained failed report and every pending winner while
-            // observations are acquired. Validation must see the complete cutover.
-            let mut staged: BTreeMap<String, Vec<Device>> = self
-                .statuses
-                .keys()
-                .map(|id| (id.clone(), vec![]))
-                .collect();
-            let mut represented = BTreeSet::new();
-            let pending = DriverError::new(ErrorCode::DeviceUnavailable, StateStore::FAULT_MESSAGE);
-            for (id, (owner, candidate)) in &winners {
-                let device = self
-                    .routes
-                    .get(id)
-                    .filter(|route| route.owner == *owner && route.candidate.equivalent(candidate))
-                    .map(|route| route.device.clone())
-                    .unwrap_or_else(|| self.stale(candidate, &pending));
-                represented.insert(id.clone());
-                staged.get_mut(owner).expect("staged owner").push(device);
-            }
-            let conflict = DriverError::new(ErrorCode::DriverConflict, StateStore::FAULT_MESSAGE);
-            for (owner, candidate) in &conflicts {
-                if represented.insert(candidate.device.id.clone()) {
-                    staged
-                        .get_mut(owner)
-                        .expect("staged owner")
-                        .push(self.stale(candidate, &conflict));
-                }
-            }
-            let published = self.store.snapshot();
-            for previous in &published.devices {
-                if let Some(error) = self.failed.get(&previous.driver) {
-                    if represented.insert(previous.id.clone()) {
-                        let mut device = previous.clone();
-                        unavailable(&mut device, error);
-                        staged
-                            .get_mut(&previous.driver)
-                            .expect("retained owner")
-                            .push(device);
-                    }
-                }
-            }
+            let (winners, conflicts) = self.select_winners();
+            let staged = self.stage_reports(&winners, &conflicts);
             if let Err(error) = self.check_snapshot(staged.values().flatten().cloned().collect()) {
                 let owner = winners
                     .values()
@@ -782,145 +870,23 @@ impl Coordinator {
             }
             self.reports = staged;
             for (id, (owner, candidate)) in winners {
-                if self.quarantined.contains(&owner) {
-                    continue;
-                }
-                if !self.routes.contains_key(&id) {
-                    let key = (owner.clone(), id.clone());
-                    if !self.history.contains_key(&key) && self.history.len() >= 4096 {
-                        let error = DriverError::new(
-                            ErrorCode::PluginError,
-                            "Plugin device identity history is exhausted.",
-                        );
-                        self.quarantine(&owner, &error).await;
-                        let device = self.stale(&candidate, &error);
-                        self.set_report(&owner, device);
-                        continue;
-                    }
-                    let tokens: Vec<_> = candidate
-                        .endpoints
-                        .iter()
-                        .map(|endpoint| endpoint.token)
-                        .collect();
-                    let mut identities: Vec<_> = candidate
-                        .endpoints
-                        .iter()
-                        .map(|endpoint| endpoint.identity.clone())
-                        .collect();
-                    identities.sort();
-                    // An unchanged token generation is the same live connection; reconnection needs nonempty identity equality.
-                    let restore = !candidate.same_identity
-                        || self.history.get(&key).is_none_or(|history| {
-                            history.tokens == tokens
-                                || (history.identities.len() == identities.len()
-                                    && history
-                                        .identities
-                                        .iter()
-                                        .zip(&identities)
-                                        .all(|(old, new)| old.is_some() && old == new))
-                        });
-                    if !restore {
-                        let error = DriverError::new(
-                            ErrorCode::DeviceUnavailable,
-                            "Device identity cannot safely restore this driver's retired claim.",
-                        );
-                        let device = self.stale(&candidate, &error);
-                        self.set_report(&owner, device);
-                        let status = self.statuses.get_mut(&owner).expect("status");
-                        status.state = DriverState::Disconnected;
-                        status.error = Some(exposed_error(&error));
-                        continue;
-                    }
-                    self.epoch += 1;
-                    let grant = self.gates.activate(
-                        owner.clone(),
-                        id.clone(),
-                        self.epoch,
-                        tokens.clone(),
-                    )?;
-                    let runtime = &self.runtimes[&owner];
-                    let (reply, receiver) = oneshot::channel();
-                    let activation = runtime.sender.try_send(RuntimeCommand::Activate {
-                        serial: candidate.serial,
-                        grant: grant.clone(),
-                        reply,
-                    });
-                    let result = if activation.is_err() {
-                        Err(Failure {
-                            error: busy(),
-                            fatal: false,
-                        })
-                    } else {
-                        match tokio::time::timeout(CALLBACK_LIMIT, receiver).await {
-                            Ok(Ok(result)) => result,
-                            _ => Err(Failure::fatal(timeout_error())),
-                        }
-                    };
-                    let result = result.and_then(|device| {
-                        self.check_report(&owner, &device).map_err(Failure::fatal)?;
-                        Ok(device)
-                    });
-                    let device = match result {
-                        Ok(device) => device,
-                        Err(failure) => {
-                            grant.revoke();
-                            grant.drain(Instant::now() + CALLBACK_LIMIT).await?;
-                            if failure.fatal {
-                                self.quarantine(&owner, &failure.error).await;
-                            }
-                            let device = self.stale(&candidate, &failure.error);
-                            self.set_report(&owner, device);
-                            continue;
-                        }
-                    };
-                    self.history.insert(key, History { tokens, identities });
-                    self.routes.insert(
-                        id.clone(),
-                        Route {
-                            owner: owner.clone(),
-                            candidate,
-                            grant,
-                            device,
-                            sequence: 0,
-                        },
-                    );
-                }
-                if let Some(device) = self.routes.get(&id).map(|route| route.device.clone()) {
-                    self.set_report(&owner, device);
+                if !self.quarantined.contains(&owner) {
+                    self.activate_route(&id, &owner, candidate).await?;
                 }
             }
-            for (owner, candidate) in conflicts {
-                let error = DriverError::new(
-                    ErrorCode::DriverConflict,
-                    "Installed drivers have conflicting device or endpoint claims.",
-                );
-                let status = self.statuses.get_mut(&owner).expect("status");
-                status.state = DriverState::Ambiguous;
-                status.error = Some(exposed_error(&error));
-                // This is a reporting representative only. No directory-order write grant is awarded.
-                if !self
-                    .reports
-                    .values()
-                    .flatten()
-                    .any(|device| device.id == candidate.device.id)
-                {
-                    let device = self.stale(&candidate, &error);
-                    self.reports.get_mut(&owner).expect("report").push(device);
-                }
-            }
+            self.report_conflicts(&conflicts);
             let published = self.store.snapshot();
             for previous in &published.devices {
-                if let Some(error) = self.failed.get(&previous.driver) {
-                    if !self
+                if let Some(error) = self.failed.get(&previous.driver)
+                    && !self
                         .reports
                         .values()
                         .flatten()
                         .any(|device| device.id == previous.id)
-                    {
-                        let mut device = previous.clone();
-                        unavailable(&mut device, error);
-                        self.set_report(&previous.driver, device);
-                    }
+                {
+                    let mut device = previous.clone();
+                    unavailable(&mut device, error);
+                    self.set_report(&previous.driver, device);
                 }
             }
             self.last.retain(|(owner, id), _| {
@@ -931,6 +897,254 @@ impl Coordinator {
                 })
             });
             return self.publish();
+        }
+    }
+    fn select_winners(&self) -> CandidateSelection {
+        let candidates: Vec<_> = self
+            .candidates
+            .iter()
+            .filter(|(id, _)| !self.quarantined.contains(*id) && !self.failed.contains_key(*id))
+            .flat_map(|(owner, candidates)| {
+                candidates
+                    .iter()
+                    .map(move |candidate| (owner.clone(), candidate.clone()))
+            })
+            .collect();
+        let mut endpoints = BTreeMap::<u64, BTreeSet<usize>>::new();
+        let mut ids = BTreeMap::<&str, BTreeSet<usize>>::new();
+        for (index, (_, candidate)) in candidates.iter().enumerate() {
+            ids.entry(&candidate.device.id).or_default().insert(index);
+            for endpoint in &candidate.endpoints {
+                endpoints
+                    .entry(endpoint.token.id)
+                    .or_default()
+                    .insert(index);
+            }
+        }
+        let mut selected = BTreeSet::new();
+        for (index, (owner, candidate)) in candidates.iter().enumerate() {
+            let mut peers = ids[candidate.device.id.as_str()].clone();
+            for endpoint in &candidate.endpoints {
+                peers.extend(&endpoints[&endpoint.token.id]);
+            }
+            peers.remove(&index);
+            let wins = peers.iter().all(|other_index| {
+                let (other_owner, other) = &candidates[*other_index];
+                let shared = candidate
+                    .endpoints
+                    .iter()
+                    .any(|endpoint| endpoints[&endpoint.token.id].contains(other_index));
+                (candidate.device.id != other.device.id || shared)
+                    && self.dominance[owner].contains(other_owner)
+            });
+            if wins {
+                selected.insert(index);
+            }
+        }
+        let mut endpoint_winners = BTreeMap::new();
+        let mut winners = BTreeMap::new();
+        for index in &selected {
+            let (owner, candidate) = &candidates[*index];
+            for endpoint in &candidate.endpoints {
+                endpoint_winners.insert(endpoint.token.id, owner);
+            }
+            winners.insert(
+                candidate.device.id.clone(),
+                (owner.clone(), candidate.clone()),
+            );
+        }
+        let mut conflicts = Vec::new();
+        for (index, (owner, candidate)) in candidates.iter().enumerate() {
+            if selected.contains(&index) {
+                continue;
+            }
+            let fully_superseded = !candidate.endpoints.is_empty()
+                && candidate.endpoints.iter().all(|endpoint| {
+                    endpoint_winners
+                        .get(&endpoint.token.id)
+                        .is_some_and(|winner| self.dominance[*winner].contains(owner))
+                });
+            if !fully_superseded {
+                conflicts.push((owner.clone(), candidate.clone()));
+            }
+        }
+        (winners, conflicts)
+    }
+    fn stage_reports(
+        &self,
+        winners: &BTreeMap<String, (String, Candidate)>,
+        conflicts: &[(String, Candidate)],
+    ) -> BTreeMap<String, Vec<Device>> {
+        // Preserve every retained failed report and every pending winner while
+        // observations are acquired. Validation must see the complete cutover.
+        let mut staged: BTreeMap<String, Vec<Device>> = self
+            .statuses
+            .keys()
+            .map(|id| (id.clone(), vec![]))
+            .collect();
+        let mut represented = BTreeSet::new();
+        let pending = DriverError::new(ErrorCode::DeviceUnavailable, StateStore::FAULT_MESSAGE);
+        for (id, (owner, candidate)) in winners {
+            let device = self
+                .routes
+                .get(id)
+                .filter(|route| route.owner == *owner && route.candidate.equivalent(candidate))
+                .map(|route| route.device.clone())
+                .unwrap_or_else(|| self.stale(candidate, &pending));
+            represented.insert(id.clone());
+            staged.get_mut(owner).expect("staged owner").push(device);
+        }
+        let conflict = DriverError::new(ErrorCode::DriverConflict, StateStore::FAULT_MESSAGE);
+        for (owner, candidate) in conflicts {
+            if represented.insert(candidate.device.id.clone()) {
+                staged
+                    .get_mut(owner)
+                    .expect("staged owner")
+                    .push(self.stale(candidate, &conflict));
+            }
+        }
+        let published = self.store.snapshot();
+        for previous in &published.devices {
+            if let Some(error) = self.failed.get(&previous.driver)
+                && represented.insert(previous.id.clone())
+            {
+                let mut device = previous.clone();
+                unavailable(&mut device, error);
+                staged
+                    .get_mut(&previous.driver)
+                    .expect("retained owner")
+                    .push(device);
+            }
+        }
+        staged
+    }
+    async fn activate_route(
+        &mut self,
+        id: &str,
+        owner: &str,
+        candidate: Candidate,
+    ) -> Result<(), DriverError> {
+        if !self.routes.contains_key(id) {
+            let key = (owner.to_owned(), id.to_owned());
+            if !self.history.contains_key(&key) && self.history.len() >= 4096 {
+                let error = DriverError::new(
+                    ErrorCode::PluginError,
+                    "Plugin device identity history is exhausted.",
+                );
+                self.quarantine(owner, &error).await;
+                let device = self.stale(&candidate, &error);
+                self.set_report(owner, device);
+                return Ok(());
+            }
+            let tokens: Vec<_> = candidate
+                .endpoints
+                .iter()
+                .map(|endpoint| endpoint.token)
+                .collect();
+            let mut identities: Vec<_> = candidate
+                .endpoints
+                .iter()
+                .map(|endpoint| endpoint.identity.clone())
+                .collect();
+            identities.sort();
+            // An unchanged token generation is the same live connection; reconnection needs nonempty identity equality.
+            let restore = !candidate.same_identity
+                || self.history.get(&key).is_none_or(|history| {
+                    history.tokens == tokens
+                        || (history.identities.len() == identities.len()
+                            && history
+                                .identities
+                                .iter()
+                                .zip(&identities)
+                                .all(|(old, new)| old.is_some() && old == new))
+                });
+            if !restore {
+                let error = DriverError::new(
+                    ErrorCode::DeviceUnavailable,
+                    "Device identity cannot safely restore this driver's retired claim.",
+                );
+                let device = self.stale(&candidate, &error);
+                self.set_report(owner, device);
+                let status = self.status_mut(owner);
+                status.state = DriverState::Disconnected;
+                status.error = Some(exposed_error(&error));
+                return Ok(());
+            }
+            self.epoch += 1;
+            let grant =
+                self.gates
+                    .activate(owner.to_owned(), id.to_owned(), self.epoch, tokens.clone())?;
+            let runtime = &self.runtimes[owner];
+            let (reply, receiver) = oneshot::channel();
+            let activation = runtime.sender.try_send(RuntimeCommand::Activate {
+                serial: candidate.serial,
+                grant: grant.clone(),
+                reply,
+            });
+            let result = if activation.is_err() {
+                Err(Failure {
+                    error: busy(),
+                    fatal: false,
+                })
+            } else {
+                match tokio::time::timeout(CALLBACK_LIMIT, receiver).await {
+                    Ok(Ok(result)) => result,
+                    _ => Err(Failure::fatal(timeout_error())),
+                }
+            };
+            let result = result.and_then(|device| {
+                self.check_report(owner, &device).map_err(Failure::fatal)?;
+                Ok(device)
+            });
+            let device = match result {
+                Ok(device) => device,
+                Err(failure) => {
+                    grant.revoke();
+                    grant.drain(Instant::now() + CALLBACK_LIMIT).await?;
+                    if failure.fatal {
+                        self.quarantine(owner, &failure.error).await;
+                    }
+                    let device = self.stale(&candidate, &failure.error);
+                    self.set_report(owner, device);
+                    return Ok(());
+                }
+            };
+            self.history.insert(key, History { tokens, identities });
+            self.routes.insert(
+                id.to_owned(),
+                Route {
+                    owner: owner.to_owned(),
+                    candidate,
+                    grant,
+                    device,
+                    sequence: 0,
+                },
+            );
+        }
+        if let Some(device) = self.routes.get(id).map(|route| route.device.clone()) {
+            self.set_report(owner, device);
+        }
+        Ok(())
+    }
+    fn report_conflicts(&mut self, conflicts: &[(String, Candidate)]) {
+        for (owner, candidate) in conflicts {
+            let error = DriverError::new(
+                ErrorCode::DriverConflict,
+                "Installed drivers have conflicting device or endpoint claims.",
+            );
+            let status = self.status_mut(owner);
+            status.state = DriverState::Ambiguous;
+            status.error = Some(exposed_error(&error));
+            // This is a reporting representative only. No directory-order write grant is awarded.
+            if !self
+                .reports
+                .values()
+                .flatten()
+                .any(|device| device.id == candidate.device.id)
+            {
+                let device = self.stale(candidate, &error);
+                self.reports.get_mut(owner).expect("report").push(device);
+            }
         }
     }
     fn stale(&self, candidate: &Candidate, error: &DriverError) -> Device {
@@ -955,6 +1169,10 @@ impl Coordinator {
         unavailable(&mut device, error);
         device
     }
+    /// Every package has a status row for the coordinator's entire lifetime.
+    fn status_mut(&mut self, id: &str) -> &mut DriverStatus {
+        self.statuses.get_mut(id).expect("status")
+    }
     fn set_report(&mut self, owner: &str, device: Device) {
         let report = self.reports.get_mut(owner).expect("driver report");
         if let Some(previous) = report.iter_mut().find(|previous| previous.id == device.id) {
@@ -962,6 +1180,30 @@ impl Coordinator {
         } else {
             report.push(device);
         }
+    }
+    fn refresh_bindings(&self) {
+        let bindings = self
+            .routes
+            .iter()
+            .map(|(device_id, route)| {
+                let mut endpoints: Vec<_> = route
+                    .candidate
+                    .endpoints
+                    .iter()
+                    .map(|endpoint| endpoint.token)
+                    .collect();
+                endpoints.sort_unstable();
+                endpoints.dedup();
+                (
+                    device_id.clone(),
+                    Binding {
+                        driver: route.owner.clone(),
+                        endpoints,
+                    },
+                )
+            })
+            .collect();
+        self.binding_updates.send_replace(Arc::new(bindings));
     }
     fn publish(&self) -> Result<(), DriverError> {
         self.store.publish_driver_states(
@@ -975,12 +1217,14 @@ impl Coordinator {
                 })
                 .collect(),
         )?;
+        self.refresh_bindings();
         Ok(())
     }
     async fn retire(&mut self, id: &str, deadline: Instant) -> Result<(), DriverError> {
         let Some(route) = self.routes.remove(id) else {
             return Ok(());
         };
+        self.refresh_bindings();
         self.last
             .insert((route.owner.clone(), id.into()), route.device.clone());
         route.grant.revoke();
@@ -1019,7 +1263,7 @@ impl Coordinator {
             }
         }
         if let Some(failure) = &failure {
-            tracing::warn!(target: "plugins", code = ?failure.error.code, "Plugin retirement callback failed.");
+            tracing::warn!(target: "synapsed::plugins", public_message = %"Plugin retirement callback failed.", code = ?failure.error.code);
             if failure.fatal {
                 self.revoke_failure(&route.owner, &failure.error);
             }
@@ -1062,7 +1306,7 @@ impl Coordinator {
             };
             self.quarantined.insert(id.clone());
             self.failed.insert(id.clone(), failure.clone());
-            let status = self.statuses.get_mut(id).expect("status");
+            let status = self.status_mut(id);
             status.state = if id == owner {
                 DriverState::Error
             } else {
@@ -1096,9 +1340,10 @@ impl Coordinator {
         let deadline = Instant::now() + CALLBACK_LIMIT;
         for id in ids {
             if let Err(error) = self.retire(&id, deadline).await {
-                tracing::error!(target: "plugins", code = ?error.code, "Quarantined native work did not drain before deadline.");
+                tracing::error!(target: "synapsed::plugins", public_message = %"Quarantined native work did not drain before deadline.", code = ?error.code);
             }
         }
+        self.refresh_bindings();
     }
     async fn dispatch(
         &mut self,
@@ -1195,11 +1440,11 @@ impl Coordinator {
         });
         match result {
             Ok(device) => {
-                if let Some(current) = self.routes.get_mut(id) {
-                    if current.grant.epoch == route.grant.epoch {
-                        current.device = device.clone();
-                        current.sequence = sequence;
-                    }
+                if let Some(current) = self.routes.get_mut(id)
+                    && current.grant.epoch() == route.grant.epoch()
+                {
+                    current.device = device.clone();
+                    current.sequence = sequence;
                 }
                 if let Some(report) = self
                     .reports
@@ -1226,22 +1471,24 @@ impl Coordinator {
                 if failure.fatal {
                     self.quarantine(&route.owner, &failure.error).await;
                 }
-                if let Some(operation) = cancellation
-                    .operation
-                    .lock()
-                    .expect("operation cancellation")
-                    .as_ref()
-                {
-                    for outcome in operation.outcomes() {
-                        if outcome.observed.is_some() && outcome.error.is_none() {
-                            tracing::info!(target: "plugins", "Native write completion retained after callback failure.");
-                        } else {
-                            tracing::warn!(target: "plugins", "Native write confirmation remained unavailable after callback failure.");
-                        }
-                    }
-                }
+                self.log_dispatch_outcomes(&cancellation);
                 let _ = self.publish();
                 Err(failure.error)
+            }
+        }
+    }
+    fn log_dispatch_outcomes(&self, cancellation: &Cancellation) {
+        let operation = cancellation
+            .operation
+            .lock()
+            .expect("operation cancellation");
+        if let Some(operation) = operation.as_ref() {
+            for outcome in operation.outcomes() {
+                if outcome.observed.is_some() && outcome.error.is_none() {
+                    tracing::info!(target: "synapsed::plugins", public_message = %"Native write completion retained after callback failure.");
+                } else {
+                    tracing::warn!(target: "synapsed::plugins", public_message = %"Native write confirmation remained unavailable after callback failure.");
+                }
             }
         }
     }
@@ -1249,7 +1496,7 @@ impl Coordinator {
         let fatal = event.result.as_ref().is_err_and(|failure| failure.fatal);
         if self.routes.get(&event.id).is_none_or(|route| {
             route.owner != event.owner
-                || route.grant.epoch != event.epoch
+                || route.grant.epoch() != event.epoch
                 || (!fatal && event.sequence != 0 && event.sequence <= route.sequence)
         }) {
             return;
@@ -1325,7 +1572,7 @@ impl Coordinator {
             error = Some(failure);
         }
         if let Some(error) = error {
-            tracing::error!(target: "plugins", code = ?error.code, "Shutdown left an unknown callback or native outcome.");
+            tracing::error!(target: "synapsed::plugins", public_message = %"Shutdown left an unknown callback or native outcome.", code = ?error.code);
             Err(error)
         } else {
             Ok(())
@@ -1343,4 +1590,183 @@ fn timeout_error() -> DriverError {
         ErrorCode::Timeout,
         "Plugin operation exceeded its deadline.",
     )
+}
+
+#[cfg(test)]
+mod inventory_tests {
+    use super::*;
+
+    #[test]
+    fn plugin_catalog_projects_benq_inventory_match() {
+        let manifest: manifest::Manifest =
+            serde_json::from_str(include_str!("../../../drivers/benq-rd280u/plugin.json")).unwrap();
+        let catalog = Catalog {
+            packages: BTreeMap::from([(
+                manifest.id.clone(),
+                Package {
+                    manifest,
+                    sources: Arc::new(BTreeMap::new()),
+                },
+            )]),
+            statuses: BTreeMap::new(),
+        };
+        let entries = catalog_entries(&catalog);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].id, "benq-rd280u");
+        assert_eq!(entries[0].version, "0.1.0");
+        assert_eq!(entries[0].supersedes, vec!["generic-ddc".to_owned()]);
+        assert_eq!(
+            entries[0].inventory_matches,
+            vec![InventoryMatch::Usb {
+                vendor_id: "0bda".to_owned(),
+                product_id: "1100".to_owned(),
+                role: InventoryRole::MonitorCompanion,
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn published_bindings_follow_active_routes_and_retirement() {
+        let store = StateStore::new(synapsed_api::NodeInfo {
+            node_id: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee".to_owned(),
+            instance_id: "bbbbbbbb-cccc-4ddd-8eee-ffffffffffff".to_owned(),
+            name: "Bindings test host".to_owned(),
+        })
+        .unwrap();
+        let token = EndpointToken {
+            id: 7,
+            generation: 2,
+        };
+        let endpoint = EndpointDescriptor {
+            token,
+            capability: "ddc".to_owned(),
+            manufacturer: None,
+            product: None,
+            product_name: None,
+            identity: None,
+        };
+        let device = Device {
+            id: "monitor".to_owned(),
+            driver: "fixture-driver".to_owned(),
+            kind: "display".to_owned(),
+            label: "Fixture display".to_owned(),
+            status: DeviceStatus::Online,
+            error: None,
+            characteristics: Vec::new(),
+        };
+        let candidate = Candidate {
+            serial: 1,
+            device: device.clone(),
+            endpoints: vec![endpoint],
+            same_identity: false,
+            poll_ms: None,
+            writes: BTreeMap::new(),
+        };
+        let gates = EndpointGates::default();
+        let grant = gates
+            .activate("fixture-driver", "monitor", 1, vec![token])
+            .unwrap();
+        let (binding_updates, bindings) = watch::channel(Arc::new(BTreeMap::new()));
+        let mut coordinator = Coordinator {
+            store,
+            registry: CapabilityRegistry::default(),
+            packages: BTreeMap::new(),
+            statuses: BTreeMap::new(),
+            runtimes: BTreeMap::new(),
+            candidates: BTreeMap::new(),
+            failed: BTreeMap::new(),
+            quarantined: BTreeSet::new(),
+            routes: BTreeMap::from([(
+                "monitor".to_owned(),
+                Route {
+                    owner: "fixture-driver".to_owned(),
+                    candidate,
+                    grant,
+                    device,
+                    sequence: 0,
+                },
+            )]),
+            history: BTreeMap::new(),
+            gates,
+            epoch: 1,
+            reports: BTreeMap::new(),
+            last: BTreeMap::new(),
+            dominance: BTreeMap::new(),
+            current: Arc::new(Mutex::new(None)),
+            binding_updates,
+            #[cfg(debug_assertions)]
+            discovery_round: 0,
+        };
+        coordinator.publish().unwrap();
+        let published = bindings.borrow().clone();
+        assert_eq!(published.len(), 1);
+        assert_eq!(published["monitor"].driver, "fixture-driver");
+        assert_eq!(published["monitor"].endpoints, vec![token]);
+
+        coordinator
+            .retire("monitor", Instant::now() + CALLBACK_LIMIT)
+            .await
+            .unwrap();
+        assert!(bindings.borrow().is_empty());
+    }
+    #[tokio::test]
+    async fn plugin_host_publishes_manifest_catalog_without_starting_ddc() {
+        let directory = tempfile::tempdir().unwrap();
+        let plugins = directory.path().join("drivers");
+        std::fs::create_dir(&plugins).unwrap();
+        let driver_source = "return { configure = function() return { discover = function() return { devices = {} } end } end }";
+        for (id, manifest) in [
+            (
+                "generic-ddc",
+                r#"{"apiVersion":1,"id":"generic-ddc","version":"0.1.0","entry":"driver.lua","dependencies":[],"supersedes":[],"capabilities":{"ddc":1},"permissions":{"ddc":{"read":[],"write":[]}}}"#,
+            ),
+            (
+                "benq-rd280u",
+                include_str!("../../../drivers/benq-rd280u/plugin.json"),
+            ),
+        ] {
+            let package = plugins.join(id);
+            std::fs::create_dir(&package).unwrap();
+            std::fs::write(package.join("plugin.json"), manifest).unwrap();
+            std::fs::write(package.join("driver.lua"), driver_source).unwrap();
+        }
+        let store = StateStore::new(synapsed_api::NodeInfo {
+            node_id: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee".to_owned(),
+            instance_id: "bbbbbbbb-cccc-4ddd-8eee-ffffffffffff".to_owned(),
+            name: "Catalog test host".to_owned(),
+        })
+        .unwrap();
+        let ddc = synapsed_ddc::LazyDdc::new();
+        let mut registry = CapabilityRegistry::default();
+        registry
+            .register(Arc::new(
+                capabilities::ddc::DdcCapabilityFactory::with_shared(ddc.clone()),
+            ))
+            .unwrap();
+        let host = PluginHost::start(
+            store,
+            PluginConfig {
+                directory: plugins,
+                directory_explicit: true,
+                disabled: Vec::new(),
+                discovery_interval_ms: 5000,
+                settings: BTreeMap::new(),
+            },
+            registry,
+        )
+        .unwrap();
+        let entries = host.catalog();
+        assert!(entries.iter().any(|entry| {
+            entry.id == "benq-rd280u"
+                && entry.inventory_matches.contains(&InventoryMatch::Usb {
+                    vendor_id: "0bda".to_owned(),
+                    product_id: "1100".to_owned(),
+                    role: InventoryRole::MonitorCompanion,
+                })
+        }));
+        assert!(ddc.existing().is_none());
+        host.shutdown(Instant::now() + CALLBACK_LIMIT)
+            .await
+            .unwrap();
+    }
 }

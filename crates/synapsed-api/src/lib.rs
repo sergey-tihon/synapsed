@@ -1,45 +1,90 @@
+#![warn(missing_docs)]
+
 //! Device-neutral local API wire data and shared semantic validation.
 //! Deserialization is deliberately separate from semantic validation: callers must
 //! validate received declarations, commands and observations before using them.
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
-
+mod inventory;
+pub use inventory::*;
+/// Current wire API version.
 pub const API_VERSION: u8 = 1;
+/// Maximum encoded characteristic command size in bytes.
 pub const MAX_COMMAND_BYTES: usize = 16 * 1024;
+/// Maximum encoded snapshot size in bytes.
 pub const MAX_SNAPSHOT_BYTES: usize = 512 * 1024;
+/// Maximum devices in a snapshot.
 pub const MAX_DEVICES: usize = 64;
+/// Maximum characteristics in a snapshot.
 pub const MAX_CHARACTERISTICS: usize = 512;
+/// Maximum characteristics on one device.
 pub const MAX_CHARACTERISTICS_PER_DEVICE: usize = 64;
+/// Maximum drivers in a snapshot.
 pub const MAX_DRIVERS: usize = 16;
+/// Maximum recent log entries.
 pub const MAX_LOG_ENTRIES: usize = 200;
+/// Regular expression for canonical non-negative decimal sequence strings.
 pub const DECIMAL_SEQUENCE_PATTERN: &str = "^(0|[1-9][0-9]*)$";
+/// Regular expression for declaration identifiers.
 pub const DECLARATION_ID_PATTERN: &str = "^[a-z][a-z0-9_.-]{0,63}$";
+/// Regular expression for driver identifiers.
 pub const DRIVER_ID_PATTERN: &str = "^[a-z][a-z0-9-]{0,63}$";
+/// Regular expression for opaque public inventory node identifiers.
+pub const INVENTORY_NODE_ID_PATTERN: &str = "^n[0-9a-f]{16}$";
+/// Regular expression for four-digit lowercase USB identifiers.
+pub const USB_ID_PATTERN: &str = "^[0-9a-f]{4}$";
+/// Regular expression for numeric semantic driver versions.
+pub const DRIVER_VERSION_PATTERN: &str = "^[0-9]+\\.[0-9]+\\.[0-9]+$";
+/// Regular expression for canonical lowercase UUID version 4 strings.
+pub const UUID_V4_PATTERN: &str =
+    "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$";
+/// Regular expression for UTC RFC 3339 timestamps with an optional fractional second.
+pub const UTC_TIMESTAMP_PATTERN: &str =
+    "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]+)?(Z|\\+00:00)$";
+/// Result type returned by API validation routines.
 pub type ValidationResult = Result<(), ApiError>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
+/// Machine-readable category describing an API error.
 pub enum ErrorCode {
+    /// The request could not be parsed or otherwise violates the API contract.
     InvalidRequest,
+    /// The request origin is not allowed.
     ForbiddenOrigin,
+    /// The request host is not allowed.
     ForbiddenHost,
+    /// The requested device does not exist.
     UnknownDevice,
+    /// The requested characteristic does not exist.
     UnknownCharacteristic,
+    /// The request identifies more than one device.
     AmbiguousDevice,
+    /// The requested driver operation conflicts with current ownership.
     DriverConflict,
+    /// The requested operation is not supported.
     UnsupportedOperation,
+    /// A supplied value is invalid.
     InvalidValue,
+    /// The operation is not permitted.
     PermissionDenied,
+    /// The requested device is unavailable.
     DeviceUnavailable,
+    /// A DDC transport operation failed.
     DdcError,
+    /// A driver plugin operation failed.
     PluginError,
+    /// The requested capability is not supported.
     UnsupportedCapability,
+    /// The operation could not proceed because the service is busy.
     Busy,
+    /// The operation exceeded its deadline.
     Timeout,
 }
 impl ErrorCode {
+    /// Map this error category to its HTTP response status.
     pub const fn http_status(self) -> u16 {
         match self {
             Self::InvalidRequest => 400,
@@ -61,9 +106,12 @@ impl ErrorCode {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
+/// An API error with a bounded, user-safe message.
 pub struct ApiError {
+    /// Category identifying the kind of failure.
     pub code: ErrorCode,
     #[cfg_attr(feature = "schema", schemars(length(max = 256)))]
+    /// Bounded human-readable description of the failure.
     pub message: String,
 }
 impl ApiError {
@@ -74,6 +122,7 @@ impl ApiError {
             message: message.into(),
         }
     }
+    /// Validate that the message satisfies the API's size and non-empty requirements.
     pub fn validate(&self) -> ValidationResult {
         bounded(&self.message, 256, false)
     }
@@ -87,10 +136,13 @@ impl std::error::Error for ApiError {}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+/// Standard response body containing an API error.
 pub struct ErrorResponse {
+    /// The error details returned to the caller.
     pub error: ApiError,
 }
 impl ErrorResponse {
+    /// Validate this error response.
     pub fn validate(&self) -> ValidationResult {
         self.error.validate()
     }
@@ -99,31 +151,36 @@ impl ErrorResponse {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
+/// Identifiers and display name for the daemon node and its running instance.
 pub struct NodeInfo {
     #[cfg_attr(
         feature = "schema",
         schemars(
             with = "String",
             regex(
-                pattern = "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+                pattern = UUID_V4_PATTERN
             )
         )
     )]
+    /// Stable identifier for this node, encoded as canonical lowercase UUID-v4.
     pub node_id: String,
     #[cfg_attr(
         feature = "schema",
         schemars(
             with = "String",
             regex(
-                pattern = "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+                pattern = UUID_V4_PATTERN
             )
         )
     )]
+    /// Identifier for this daemon instance, encoded as canonical lowercase UUID-v4.
     pub instance_id: String,
     #[cfg_attr(feature = "schema", schemars(length(min = 1, max = 128)))]
+    /// User-facing node name.
     pub name: String,
 }
 impl NodeInfo {
+    /// Validate both identities and the node name.
     pub fn validate(&self) -> ValidationResult {
         validate_uuid_v4(&self.node_id)?;
         validate_uuid_v4(&self.instance_id)?;
@@ -134,24 +191,37 @@ impl NodeInfo {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
+/// Current lifecycle or failure state of an installed driver.
 pub enum DriverState {
+    /// The driver is installed but disabled.
     Disabled,
+    /// The driver is operating normally.
     Online,
+    /// The driver is disconnected from its resource.
     Disconnected,
+    /// The driver identity or resource is ambiguous.
     Ambiguous,
+    /// Required access was denied.
     PermissionDenied,
+    /// The driver encountered an error.
     Error,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+/// Status and optional error details for an installed driver.
 pub struct DriverStatus {
     #[cfg_attr(feature = "schema", schemars(length(min = 1, max = 256)))]
+    /// Driver identifier.
     pub id: String,
+    /// Three-component numeric driver version, or `unknown`.
     pub version: String,
+    /// Current driver lifecycle state.
     pub state: DriverState,
+    /// Optional safe description of the driver's current error.
     pub error: Option<ApiError>,
 }
 impl DriverStatus {
+    /// Validate the driver's identifier, version, and optional error.
     pub fn validate(&self) -> ValidationResult {
         // Failed catalogs identify their directory, including malformed package IDs.
         if self.state == DriverState::Error {
@@ -169,12 +239,27 @@ impl DriverStatus {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(untagged)]
+/// JSON-compatible value of a characteristic observation or command.
 pub enum CharacteristicValue {
-    Boolean(bool),
-    Number(f64),
-    String(#[cfg_attr(feature = "schema", schemars(length(max = 1024)))] String),
+    /// Boolean characteristic value.
+    Boolean(
+        /// Boolean value contents.
+        bool,
+    ),
+    /// Finite numeric characteristic value.
+    Number(
+        /// Finite numeric value contents.
+        f64,
+    ),
+    /// Bounded text characteristic value.
+    String(
+        /// Text value contents.
+        #[cfg_attr(feature = "schema", schemars(length(max = 1024)))]
+        String,
+    ),
 }
 impl CharacteristicValue {
+    /// Validate that numeric values are finite and text values are bounded.
     pub fn validate(&self) -> ValidationResult {
         match self {
             Self::Number(value) if !value.is_finite() => invalid("Number must be finite."),
@@ -186,10 +271,13 @@ impl CharacteristicValue {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+/// A permitted value and its user-facing label for an enum characteristic.
 pub struct EnumOption {
     #[cfg_attr(feature = "schema", schemars(length(max = 1024)))]
+    /// Serialized enum value.
     pub value: String,
     #[cfg_attr(feature = "schema", schemars(length(min = 1, max = 128)))]
+    /// User-facing label for the value.
     pub label: String,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -199,27 +287,41 @@ pub struct EnumOption {
     rename_all = "snake_case",
     rename_all_fields = "camelCase"
 )]
+/// Metadata describing the shape and constraints of a characteristic value.
 pub enum CharacteristicSpec {
+    /// Numeric value with optional bounds, step, integer restriction, and unit.
     Number {
+        /// Inclusive minimum value, when specified.
         minimum: Option<f64>,
+        /// Inclusive maximum value, when specified.
         maximum: Option<f64>,
+        /// Positive increment supported by step commands, when specified.
         step: Option<f64>,
+        /// Whether values must be integral.
         integer: bool,
         #[cfg_attr(feature = "schema", schemars(length(max = 32)))]
+        /// Optional unit label.
         unit: Option<String>,
     },
+    /// Boolean value.
     Boolean,
+    /// One value selected from a bounded set of options.
     Enum {
         #[cfg_attr(feature = "schema", schemars(length(min = 1, max = 32)))]
+        /// Available enum values and their labels.
         options: Vec<EnumOption>,
     },
+    /// Text value with a maximum character count.
     String {
         #[cfg_attr(feature = "schema", schemars(range(max = 1024)))]
+        /// Maximum number of Unicode scalar values accepted.
         max_length: u32,
     },
+    /// Write-only action without a stored value.
     Action,
 }
 impl CharacteristicSpec {
+    /// Validate the internal consistency and bounds of this metadata.
     pub fn validate(&self) -> ValidationResult {
         match self {
             Self::Number {
@@ -267,6 +369,7 @@ impl CharacteristicSpec {
             _ => Ok(()),
         }
     }
+    /// Validate a value against this metadata's type and constraints.
     pub fn validate_value(&self, value: &CharacteristicValue) -> ValidationResult {
         self.validate()?;
         value.validate()?;
@@ -303,36 +406,53 @@ impl CharacteristicSpec {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+/// Read, write, and notification permissions for a characteristic.
 pub struct CharacteristicAccess {
+    /// The current value may be observed.
     pub read: bool,
+    /// A command may change the characteristic.
     pub write: bool,
+    /// Updates may be pushed without polling.
     pub notify: bool,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
+/// Availability state of a characteristic observation.
 pub enum CharacteristicStatus {
+    /// The characteristic has a valid current observation.
     Ok,
+    /// The characteristic is temporarily unavailable.
     Unavailable,
+    /// The characteristic operation or observation failed.
     Error,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+/// A characteristic declaration, access policy, and optional current observation.
 pub struct Characteristic {
     #[cfg_attr(
         feature = "schema",
-        schemars(regex(pattern = "^[a-z][a-z0-9_.-]{0,63}$"))
+        schemars(regex(pattern = DECLARATION_ID_PATTERN))
     )]
+    /// Stable identifier within the device.
     pub id: String,
     #[cfg_attr(feature = "schema", schemars(length(min = 1, max = 128)))]
+    /// User-facing characteristic label.
     pub label: String,
+    /// Value type and metadata constraints.
     pub spec: CharacteristicSpec,
+    /// Permissions granted for this characteristic.
     pub access: CharacteristicAccess,
+    /// Most recently observed value, when one is available.
     pub value: Option<CharacteristicValue>,
+    /// Current availability of the characteristic.
     pub status: CharacteristicStatus,
+    /// Optional safe description of an error.
     pub error: Option<ApiError>,
 }
 impl Characteristic {
+    /// Validate the declaration, permissions, observation, and optional error.
     pub fn validate(&self) -> ValidationResult {
         validate_id(&self.id)?;
         validate_label(&self.label)?;
@@ -359,6 +479,7 @@ impl Characteristic {
         }
         Ok(())
     }
+    /// Validate a command against this characteristic's permissions and metadata.
     pub fn validate_command(&self, command: &CharacteristicCommand) -> ValidationResult {
         self.validate()?;
         command.validate()?;
@@ -396,36 +517,48 @@ impl Characteristic {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
+/// Availability state of a device.
 pub enum DeviceStatus {
+    /// The device is available for operations.
     Online,
+    /// The device cannot currently be used.
     Unavailable,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+/// A device declaration and its characteristics.
 pub struct Device {
     #[cfg_attr(
         feature = "schema",
-        schemars(regex(pattern = "^[a-z][a-z0-9_.-]{0,63}$"))
+        schemars(regex(pattern = DECLARATION_ID_PATTERN))
     )]
+    /// Stable device identifier.
     pub id: String,
     #[cfg_attr(
         feature = "schema",
-        schemars(regex(pattern = "^[a-z][a-z0-9-]{0,63}$"))
+        schemars(regex(pattern = DRIVER_ID_PATTERN))
     )]
+    /// Identifier of the driver that owns this device.
     pub driver: String,
     #[cfg_attr(
         feature = "schema",
-        schemars(regex(pattern = "^[a-z][a-z0-9_.-]{0,63}$"))
+        schemars(regex(pattern = DECLARATION_ID_PATTERN))
     )]
+    /// Device-kind identifier.
     pub kind: String,
     #[cfg_attr(feature = "schema", schemars(length(min = 1, max = 128)))]
+    /// User-facing device label.
     pub label: String,
+    /// Current availability of the device.
     pub status: DeviceStatus,
+    /// Optional safe description of a device-level error.
     pub error: Option<ApiError>,
     #[cfg_attr(feature = "schema", schemars(length(max = 64)))]
+    /// Characteristics declared by the device.
     pub characteristics: Vec<Characteristic>,
 }
 impl Device {
+    /// Validate identifiers, bounds, ownership data, and all characteristics.
     pub fn validate(&self) -> ValidationResult {
         validate_id(&self.id)?;
         validate_id(&self.kind)?;
@@ -449,22 +582,30 @@ impl Device {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
+/// Complete device and driver state published at a single revision.
 pub struct Snapshot {
     #[cfg_attr(feature = "schema", schemars(range(min = 1, max = 1)))]
+    /// Wire API version used by this snapshot.
     pub api_version: u8,
+    /// Identity and display name of the node publishing the snapshot.
     pub node: NodeInfo,
-    #[cfg_attr(feature = "schema", schemars(regex(pattern = "^(0|[1-9][0-9]*)$")))]
+    #[cfg_attr(feature = "schema", schemars(regex(pattern = DECIMAL_SEQUENCE_PATTERN)))]
+    /// Canonical unsigned decimal revision identifier.
     pub revision: String,
     #[cfg_attr(feature = "schema", schemars(length(max = 16)))]
+    /// Installed driver statuses represented by this snapshot.
     pub drivers: Vec<DriverStatus>,
     #[cfg_attr(feature = "schema", schemars(length(max = 64)))]
+    /// Devices represented by this snapshot.
     pub devices: Vec<Device>,
 }
 impl Snapshot {
+    /// Validate structure and enforce the maximum encoded snapshot size.
     pub fn validate(&self) -> ValidationResult {
         self.validate_structure()?;
         validate_encoded_size(self, MAX_SNAPSHOT_BYTES)
     }
+    /// Validate fields, identifiers, ownership relationships, and collection limits.
     pub fn validate_structure(&self) -> ValidationResult {
         validate_api_version(self.api_version)?;
         self.node.validate()?;
@@ -516,18 +657,25 @@ impl Snapshot {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
+/// Node and driver status returned by the status endpoint.
 pub struct StatusResponse {
     #[cfg_attr(feature = "schema", schemars(range(min = 1, max = 1)))]
+    /// Wire API version used by the response.
     pub api_version: u8,
+    /// Identity and display name of the node.
     pub node: NodeInfo,
-    #[cfg_attr(feature = "schema", schemars(regex(pattern = "^(0|[1-9][0-9]*)$")))]
+    #[cfg_attr(feature = "schema", schemars(regex(pattern = DECIMAL_SEQUENCE_PATTERN)))]
+    /// Canonical unsigned decimal revision identifier.
     pub revision: String,
     #[cfg_attr(feature = "schema", schemars(range(min = 0, max = 4294967295_u64)))]
+    /// Daemon uptime in whole seconds, saturated at the wire type's maximum.
     pub uptime_seconds: u32,
     #[cfg_attr(feature = "schema", schemars(length(max = 16)))]
+    /// Installed driver statuses.
     pub drivers: Vec<DriverStatus>,
 }
 impl StatusResponse {
+    /// Validate the API version, node, revision, and driver statuses.
     pub fn validate(&self) -> ValidationResult {
         validate_api_version(self.api_version)?;
         self.node.validate()?;
@@ -537,13 +685,18 @@ impl StatusResponse {
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+/// A device together with the node and revision that describe its state.
 pub struct DeviceResponse {
+    /// Identity and display name of the node.
     pub node: NodeInfo,
-    #[cfg_attr(feature = "schema", schemars(regex(pattern = "^(0|[1-9][0-9]*)$")))]
+    #[cfg_attr(feature = "schema", schemars(regex(pattern = DECIMAL_SEQUENCE_PATTERN)))]
+    /// Canonical unsigned decimal revision identifier.
     pub revision: String,
+    /// Device data at the indicated revision.
     pub device: Device,
 }
 impl DeviceResponse {
+    /// Validate the node, revision, and device declaration.
     pub fn validate(&self) -> ValidationResult {
         self.node.validate()?;
         validate_revision(&self.revision)?;
@@ -554,18 +707,26 @@ impl DeviceResponse {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
+/// Write operation requested for a characteristic.
 pub enum CharacteristicCommand {
+    /// Set a characteristic to the supplied value.
     Set {
+        /// Target value for the set operation.
         value: CharacteristicValue,
     },
+    /// Move a numeric or enum characteristic by a relative number of steps.
     Step {
         #[cfg_attr(feature = "schema", schemars(range(min = -100, max = 100)))]
+        /// Signed number of steps, constrained to the inclusive range -100 through 100.
         steps: i32,
     },
+    /// Invert the current value of a boolean characteristic.
     Toggle {},
+    /// Invoke a write-only action characteristic.
     Invoke {},
 }
 impl CharacteristicCommand {
+    /// Validate operation-specific command fields.
     pub fn validate(&self) -> ValidationResult {
         match self {
             Self::Set { value } => value.validate(),
@@ -597,32 +758,44 @@ impl CharacteristicCommand {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
+/// Severity level for a log entry.
 pub enum LogLevel {
+    /// Diagnostic details useful during development.
     Debug,
+    /// Informational event.
     Info,
+    /// Warning that may require attention.
     Warn,
+    /// Error event.
     Error,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+/// A recent daemon log entry with a stable sequence identifier.
 pub struct LogEntry {
-    #[cfg_attr(feature = "schema", schemars(regex(pattern = "^(0|[1-9][0-9]*)$")))]
+    #[cfg_attr(feature = "schema", schemars(regex(pattern = DECIMAL_SEQUENCE_PATTERN)))]
+    /// Canonical unsigned decimal sequence identifier.
     pub id: String,
     #[cfg_attr(
         feature = "schema",
         schemars(
             with = "String",
             regex(
-                pattern = "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]+)?(Z|\\+00:00)$"
+                pattern = UTC_TIMESTAMP_PATTERN
             )
         )
     )]
+    /// UTC RFC 3339 timestamp.
     pub timestamp: String,
+    /// Severity of the log entry.
     pub level: LogLevel,
+    /// Component or subsystem that emitted the entry.
     pub target: String,
+    /// Bounded log message text.
     pub message: String,
 }
 impl LogEntry {
+    /// Validate the log sequence and UTC timestamp.
     pub fn validate(&self) -> ValidationResult {
         validate_revision(&self.id)?;
         validate_timestamp(&self.timestamp)
@@ -630,12 +803,16 @@ impl LogEntry {
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+/// A batch of recent log entries associated with a node.
 pub struct LogsResponse {
+    /// Identity and display name of the node.
     pub node: NodeInfo,
     #[cfg_attr(feature = "schema", schemars(length(max = 200)))]
+    /// Recent log entries, in sequence order.
     pub entries: Vec<LogEntry>,
 }
 impl LogsResponse {
+    /// Validate the node and bounded, uniquely identified log entries.
     pub fn validate(&self) -> ValidationResult {
         self.node.validate()?;
         validate_logs(&self.entries)
@@ -644,19 +821,27 @@ impl LogsResponse {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(tag = "type", rename_all = "snake_case")]
+/// Event streamed by the server to an API client.
 pub enum ServerEvent {
+    /// A complete replacement snapshot.
     Snapshot {
+        /// Snapshot contents.
         snapshot: Snapshot,
     },
+    /// A batch of recent log entries.
     Logs {
         #[cfg_attr(feature = "schema", schemars(length(max = 200)))]
+        /// Log entries included in the batch.
         entries: Vec<LogEntry>,
     },
+    /// A single new log entry.
     Log {
+        /// Log entry contents.
         entry: LogEntry,
     },
 }
 impl ServerEvent {
+    /// Validate the data carried by this event.
     pub fn validate(&self) -> ValidationResult {
         match self {
             Self::Snapshot { snapshot } => snapshot.validate(),
@@ -666,6 +851,7 @@ impl ServerEvent {
     }
 }
 
+/// Validate that a peer's advertised API version is supported.
 pub fn validate_api_version(version: u8) -> ValidationResult {
     if version == API_VERSION {
         Ok(())
@@ -673,6 +859,7 @@ pub fn validate_api_version(version: u8) -> ValidationResult {
         invalid("Unsupported API version.")
     }
 }
+/// Validate a canonical lowercase RFC 4122 UUID version 4.
 pub fn validate_uuid_v4(value: &str) -> ValidationResult {
     let id = uuid::Uuid::parse_str(value)
         .map_err(|_| validation_error("Node identity must be a canonical UUID-v4."))?;
@@ -685,6 +872,7 @@ pub fn validate_uuid_v4(value: &str) -> ValidationResult {
     }
     Ok(())
 }
+/// Parse a canonical unsigned decimal revision into its numeric value.
 pub fn parse_revision(value: &str) -> Result<u64, ApiError> {
     if value.is_empty()
         || !value.bytes().all(|byte| byte.is_ascii_digit())
@@ -698,12 +886,15 @@ pub fn parse_revision(value: &str) -> Result<u64, ApiError> {
         .parse()
         .map_err(|_| validation_error("Sequence exceeds u64."))
 }
+/// Validate a canonical unsigned decimal revision.
 pub fn validate_revision(value: &str) -> ValidationResult {
     parse_revision(value).map(|_| ())
 }
+/// Validate a declaration identifier, allowing dots and underscores.
 pub fn validate_id(value: &str) -> ValidationResult {
     validate_identifier(value, true)
 }
+/// Validate a driver identifier, which permits lowercase letters, digits, and hyphens.
 pub fn validate_driver_id(value: &str) -> ValidationResult {
     validate_identifier(value, false)
 }
@@ -723,6 +914,7 @@ fn validate_identifier(value: &str, dotted: bool) -> ValidationResult {
     }
     Ok(())
 }
+/// Validate a driver version containing exactly three numeric components.
 pub fn validate_driver_version(value: &str) -> ValidationResult {
     let mut parts = value.split('.');
     for _ in 0..3 {
@@ -738,9 +930,11 @@ pub fn validate_driver_version(value: &str) -> ValidationResult {
     }
     Ok(())
 }
+/// Validate a non-empty user-facing label of at most 128 characters.
 pub fn validate_label(value: &str) -> ValidationResult {
     bounded(value, 128, false)
 }
+/// Validate a UTC RFC 3339 timestamp ending in `Z` or `+00:00`.
 pub fn validate_timestamp(value: &str) -> ValidationResult {
     let timestamp =
         time::OffsetDateTime::parse(value, &time::format_description::well_known::Rfc3339)
@@ -753,6 +947,7 @@ pub fn validate_timestamp(value: &str) -> ValidationResult {
     }
     Ok(())
 }
+/// Validate text against a caller-supplied maximum length of at most 1024 characters.
 pub fn validate_string(value: &str, max_length: u32) -> ValidationResult {
     if max_length > 1024 {
         return invalid("String maximum length exceeds 1024 characters.");
@@ -828,22 +1023,11 @@ fn unsupported(message: &'static str) -> ValidationResult {
     Err(ApiError::new(ErrorCode::UnsupportedOperation, message))
 }
 
-/// Deterministic, self-contained draft-07 wire roots. No files are written by derives.
+/// Deterministic helpers for generating self-contained draft-07 wire schemas.
 #[cfg(feature = "schema")]
 pub mod schema {
     use super::*;
     use schemars::{JsonSchema, generate::SchemaSettings};
-
-    pub const ROOT_NAMES: [&str; 8] = [
-        "Snapshot",
-        "StatusResponse",
-        "DeviceResponse",
-        "LogsResponse",
-        "Characteristic",
-        "CharacteristicCommand",
-        "ServerEvent",
-        "ErrorResponse",
-    ];
 
     fn root<T: JsonSchema>(input: bool) -> serde_json::Value {
         // Rust-width numeric formats are annotations, not draft07 validation.
@@ -867,7 +1051,8 @@ pub mod schema {
             .expect("JSON Schema consists only of serializable JSON values")
     }
 
-    pub fn roots() -> [(&'static str, serde_json::Value); 8] {
+    /// Generate the named response and command schemas used by the API.
+    pub fn roots() -> [(&'static str, serde_json::Value); 9] {
         [
             ("Snapshot", root::<Snapshot>(false)),
             ("StatusResponse", root::<StatusResponse>(false)),
@@ -877,6 +1062,7 @@ pub mod schema {
             ("CharacteristicCommand", root::<CharacteristicCommand>(true)),
             ("ServerEvent", root::<ServerEvent>(false)),
             ("ErrorResponse", root::<ErrorResponse>(false)),
+            ("InventoryResponse", root::<InventoryResponse>(false)),
         ]
     }
 }

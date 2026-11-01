@@ -52,6 +52,29 @@ export function deferred() {
 export async function serverFixture(t) {
   const fixture = {
     current: snapshot(),
+    inventory: {
+      apiVersion: 1,
+      instanceId: INSTANCE_A,
+      generatedAt: "2026-10-31T12:00:00Z",
+      sources: ["usb", "thunderbolt", "ddc", "bluetooth"].map((kind) => ({ kind, state: "ok", message: null })),
+      nodes: [
+        {
+          id: "n1234567890abcdef",
+          parentId: null,
+          kind: "host",
+          label: "Isolated test node",
+          detail: null,
+          vendorId: null,
+          productId: null,
+          speedMbps: null,
+          connected: true,
+          attachment: "host",
+          relation: "exact",
+          rule: null,
+          driver: null,
+        },
+      ],
+    },
     recent: [],
     sockets: new Set(),
     clients: new Set(),
@@ -87,12 +110,14 @@ export async function serverFixture(t) {
         uptimeSeconds: 1,
         drivers: fixture.current.drivers,
       });
+    } else if (request.method === "GET" && request.url === "/api/v1/logs") {
+      reply({ node: fixture.current.node, entries: fixture.recent });
     } else if (request.method === "GET" && request.url === "/api/v1/devices") {
       reply(fixture.current);
+    } else if (request.method === "GET" && request.url === "/api/v1/inventory") {
+      reply(fixture.inventory);
     } else if (request.url === "/api/v1/devices/instrument" && request.method === "GET") {
       reply({ node: fixture.current.node, revision: fixture.current.revision, device: fixture.current.devices[0] });
-    } else if (request.url === "/api/v1/logs") {
-      reply({ node: fixture.current.node, entries: fixture.recent });
     } else if (request.method === "POST" && request.url === "/api/v1/devices/instrument/characteristics/measurement") {
       fixture.mutationCount += 1;
       const command = JSON.parse(body);
