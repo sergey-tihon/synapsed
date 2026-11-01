@@ -37,7 +37,7 @@ deploy/systemd/install.sh --generic-only
 deploy/systemd/install.sh --no-omarchy
 ```
 
-The installer installs the binaries, selected external drivers, a default config only when one is absent, and the systemd user unit. It does not start or enable the service, use sudo, or change device permissions. After checking the config, explicitly start it with the [user service commands below](#run-continuously). `--generic-only` skips installing `benq-rd280u`; `--no-omarchy` skips the widget.
+The installer installs the binaries, selected external drivers, a default config only when one is absent, and the systemd user unit under `~/.config/systemd/user`. It persists the resolved XDG config/data/state paths in a service drop-in, so custom paths from the installing shell remain available to the daemon. It does not start or enable the service, use sudo, or change device permissions. After checking the config, explicitly start it with the [user service commands below](#run-continuously). `--generic-only` skips installing `benq-rd280u`; `--no-omarchy` skips the widget.
 
 ### macOS
 

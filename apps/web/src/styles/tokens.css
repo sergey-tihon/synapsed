@@ -10,7 +10,7 @@
   --brand-cyan: #6ce3e7;
   --brand-ink: #11151c;
   --brand-mist: #e6e9f5;
-  --brand-signal: #6ce3e7;
+  --brand-signal: light-dark(#5a4fc2, #6ce3e7);
   --brand-gradient: linear-gradient(45deg, var(--brand-violet), var(--brand-cyan));
   --page-bg: light-dark(#f5f7fc, var(--brand-ink));
   --surface: light-dark(#ffffff, #171c25);

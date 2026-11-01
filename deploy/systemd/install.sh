@@ -32,13 +32,28 @@ case ${XDG_CONFIG_HOME:-} in
   /*) config_home=$XDG_CONFIG_HOME ;;
   *) config_home=$HOME/.config ;;
 esac
+case ${XDG_STATE_HOME:-} in
+  /*) state_home=$XDG_STATE_HOME ;;
+  *) state_home=$HOME/.local/state ;;
+esac
+newline='
+'
+case "$HOME$config_home$data_home$state_home" in
+  *"$newline"*)
+    printf '%s\n' 'Home and XDG paths must not contain newline characters.' >&2
+    exit 1
+    ;;
+esac
 bin_dir=$HOME/.local/bin
 drivers=$data_home/synapsed/drivers
 config=$config_home/synapsed/config.toml
-unit=$config_home/systemd/user/synapsed.service
+# User managers always search this standard location, even when XDG_CONFIG_HOME
+# is customized in the installing shell.
+unit=$HOME/.config/systemd/user/synapsed.service
+dropin=$HOME/.config/systemd/user/synapsed.service.d/10-xdg-paths.conf
 plugin=$HOME/.config/omarchy/plugins/sergey-tihon.synapsed
 
-mkdir -p "$bin_dir" "$drivers" "$(dirname "$config")" "$(dirname "$unit")"
+mkdir -p "$bin_dir" "$drivers" "$(dirname "$config")" "$(dirname "$unit")" "$(dirname "$dropin")"
 install -m 0755 "$root/bin/synapsed" "$bin_dir/synapsed"
 install -m 0755 "$root/bin/synapsectl" "$bin_dir/synapsectl"
 
@@ -62,6 +77,22 @@ else
   (umask 077; cp "$root/deploy/config.example.toml" "$config")
 fi
 install -m 0644 "$root/deploy/systemd/synapsed.service" "$unit"
+
+# The service manager may not inherit the installer's environment. Persist the
+# resolved XDG locations so the daemon finds the same config and drivers later.
+systemd_escape() {
+  printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e 's/%/%%/g'
+}
+config_home_escaped=$(systemd_escape "$config_home")
+data_home_escaped=$(systemd_escape "$data_home")
+state_home_escaped=$(systemd_escape "$state_home")
+cat > "$dropin" <<EOF
+[Service]
+Environment="XDG_CONFIG_HOME=$config_home_escaped"
+Environment="XDG_DATA_HOME=$data_home_escaped"
+Environment="XDG_STATE_HOME=$state_home_escaped"
+EOF
+chmod 0644 "$dropin"
 
 widget_installed=0
 if [ "$no_omarchy" -eq 0 ] && [ -d "$HOME/.config/omarchy" ] && [ -f "$root/omarchy/manifest.json" ]; then
