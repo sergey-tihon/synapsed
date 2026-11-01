@@ -181,11 +181,15 @@ pub(crate) fn load(
             Some(name) => name.to_owned(),
             None => {
                 use sha2::Digest;
+                use std::fmt::Write as _;
                 // Filename diagnostics only: this is never a native endpoint or hardware identity.
-                let base = format!(
-                    "invalid-directory-{:x}-{index}",
-                    sha2::Sha256::digest(name.as_encoded_bytes())
-                );
+                let digest = sha2::Sha256::digest(name.as_encoded_bytes());
+                let mut digest_hex = String::with_capacity(digest.len() * 2);
+                for byte in digest.iter() {
+                    write!(&mut digest_hex, "{byte:02x}")
+                        .expect("writing a digest to a String cannot fail");
+                }
+                let base = format!("invalid-directory-{digest_hex}-{index}");
                 let mut id = base.clone();
                 let mut suffix = 0;
                 while reserved.contains(&id) || catalog.statuses.contains_key(&id) {
