@@ -18,6 +18,6 @@ synapsed-client = { path = "../../crates/synapsed-client" }
 tokio.workspace = true
 url.workspace = true
 tray-icon = { version = "=0.26.1", default-features = false }
-tao = { version = "=0.37.0", default-features = false }
-muda = { version = "=0.21.0", default-features = false }
-open = "=5.3.3"
+tao = { version = "=0.37.2", default-features = false }
+muda = { version = "=0.21.2", default-features = false }
+open = "=5.4.5"

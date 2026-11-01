@@ -95,13 +95,11 @@ export function validateBaseUrl(baseUrl: string): URL {
     ipv4.length === 4 &&
     ipv4[0] === "127" &&
     ipv4.every((part) => /^(0|[1-9][0-9]{0,2})$/.test(part) && Number(part) <= 255);
-  if (
-    !(
-      literalHost.toLowerCase() === "localhost" ||
-      loopbackV4 ||
-      (literalHost.startsWith("[") && url.hostname === "[::1]")
-    )
-  ) {
+  if (!(
+    literalHost.toLowerCase() === "localhost" ||
+    loopbackV4 ||
+    (literalHost.startsWith("[") && url.hostname === "[::1]")
+  )) {
     throw new EndpointPolicyError();
   }
   return new URL(url.origin);
