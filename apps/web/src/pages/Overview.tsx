@@ -142,7 +142,7 @@ export default function Overview() {
             <p class="eyebrow">INSTALLED</p>
             <h2 id="drivers-heading">Drivers</h2>
           </div>
-          <a href={href({ page: "logs", level: "all" })}>Open logs →</a>
+          <a href={href({ page: "events" })}>Open events →</a>
         </div>
         <Show when={snapshot()} fallback={<p class="muted">Driver catalog not received.</p>}>
           <Show
@@ -186,10 +186,15 @@ export default function Overview() {
           <strong>Devices</strong>
           <small>Open published characteristic controls</small>
         </a>
-        <a href="#/logs">
+        <a href="#/events">
           <span>03</span>
+          <strong>Events</strong>
+          <small>Review live characteristic changes</small>
+        </a>
+        <a href="#/logs">
+          <span>04</span>
           <strong>Logs</strong>
-          <small>Review recent service messages</small>
+          <small>Review live service logs and filter by level</small>
         </a>
       </nav>
     </div>

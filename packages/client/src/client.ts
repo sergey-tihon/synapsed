@@ -1,5 +1,6 @@
 import type {
   ApiError,
+  CharacteristicChange,
   CharacteristicCommand,
   DeviceResponse,
   LogEntry,
@@ -28,6 +29,7 @@ export interface RequestOptions {
 export interface SubscriptionCallbacks {
   onSnapshot(snapshot: Snapshot): void;
   onLogs?(entries: LogEntry[]): void;
+  onCharacteristicChanged?(change: CharacteristicChange): void;
   onLog?(entry: LogEntry): void;
   /** Non-connected status explicitly marks retained snapshots/logs stale. */
   onStatus(status: ClientStatus): void;
@@ -478,6 +480,8 @@ class NativeClient implements SynapsedClient {
       this.acceptSnapshot(event.snapshot);
     } else if (event.type === "logs") {
       this.replaceLogs(event.entries);
+    } else if (event.type === "characteristic_changed") {
+      this.emit((callbacks) => callbacks.onCharacteristicChanged?.(event.change));
     } else {
       if (this.lastLogId !== null && !newer(event.entry.id, this.lastLogId)) return;
       this.lastLogId = event.entry.id;

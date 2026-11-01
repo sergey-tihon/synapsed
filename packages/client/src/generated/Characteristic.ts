@@ -97,6 +97,10 @@ export interface Characteristic {
    */
   error: ApiError | null;
   /**
+   * Identifier of the device group this characteristic belongs to, if the device declares groups.
+   */
+  group: string | null;
+  /**
    * Stable identifier within the device.
    */
   id: string;

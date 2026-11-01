@@ -30,6 +30,13 @@ describe("buildCatalog", () => {
     expect(result.selection.deviceId).toBe("monitor");
   });
 
+  it("preserves device groups and characteristic group membership", () => {
+    const grouped = device([{ ...snapshot().devices[0]!.characteristics[0]!, group: "general" }], "online");
+    grouped.groups = [{ id: "general", label: "General" }];
+    const result = buildCatalog(snapshot([grouped]), "connected", selection);
+    expect(result.devices[0]?.groups).toEqual([{ id: "general", label: "General" }]);
+    expect(result.devices[0]?.characteristics[0]?.group).toBe("general");
+  });
   it("handles an empty device catalog without dropping selections", () => {
     const result = buildCatalog(snapshot([]), "connected", selection);
     expect(result.primary).toBeNull();

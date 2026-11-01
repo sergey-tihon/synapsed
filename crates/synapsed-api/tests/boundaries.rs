@@ -11,6 +11,7 @@ fn number(integer: bool, step: Option<f64>) -> Characteristic {
     Characteristic {
         id: "measurement".into(),
         label: "Measurement".into(),
+        group: None,
         spec: CharacteristicSpec::Number {
             minimum: Some(0.0),
             maximum: Some(10.0),
@@ -36,6 +37,7 @@ fn device() -> Device {
         label: "Desk".into(),
         status: DeviceStatus::Online,
         error: None,
+        groups: vec![],
         characteristics: vec![number(false, Some(0.25))],
     }
 }
@@ -418,6 +420,131 @@ fn snapshots_validate_unique_ownership_cardinality_and_encoded_size() {
 }
 
 #[test]
+fn characteristic_groups_validate_references_bounds_and_wire_shape() {
+    let ungrouped = device();
+    assert!(ungrouped.validate().is_ok());
+
+    let mut invalid = ungrouped.clone();
+    invalid.characteristics[0].group = Some("general".into());
+    assert_eq!(
+        invalid.validate().unwrap_err().message,
+        "Characteristic group requires declared device groups."
+    );
+
+    let mut invalid = ungrouped.clone();
+    invalid.groups = vec![CharacteristicGroup {
+        id: "general".into(),
+        label: "General".into(),
+    }];
+    assert_eq!(
+        invalid.validate().unwrap_err().message,
+        "Every characteristic must reference a declared device group."
+    );
+
+    let mut invalid = ungrouped.clone();
+    invalid.groups = vec![CharacteristicGroup {
+        id: "general".into(),
+        label: "General".into(),
+    }];
+    invalid.characteristics[0].group = Some("missing".into());
+    assert_eq!(
+        invalid.validate().unwrap_err().message,
+        "Every characteristic must reference a declared device group."
+    );
+
+    let mut invalid = ungrouped.clone();
+    invalid.groups = vec![
+        CharacteristicGroup {
+            id: "general".into(),
+            label: "General".into(),
+        },
+        CharacteristicGroup {
+            id: "general".into(),
+            label: "Duplicate".into(),
+        },
+    ];
+    assert_eq!(
+        invalid.validate().unwrap_err().message,
+        "Characteristic group IDs must be unique within a device."
+    );
+
+    let mut invalid = ungrouped.clone();
+    invalid.groups = vec![CharacteristicGroup {
+        id: "general".into(),
+        label: "General".into(),
+    }];
+    invalid.characteristics.clear();
+    assert_eq!(
+        invalid.validate().unwrap_err().message,
+        "Characteristic groups must not be empty."
+    );
+
+    let mut invalid = ungrouped.clone();
+    invalid.groups = (0..17)
+        .map(|index| CharacteristicGroup {
+            id: format!("group{index}"),
+            label: format!("Group {index}"),
+        })
+        .collect();
+    assert_eq!(
+        invalid.validate().unwrap_err().message,
+        "Device has too many characteristic groups."
+    );
+
+    let mut grouped = device();
+    grouped.groups = vec![
+        CharacteristicGroup {
+            id: "general".into(),
+            label: "General".into(),
+        },
+        CharacteristicGroup {
+            id: "sensors".into(),
+            label: "Sensors".into(),
+        },
+    ];
+    let mut first = number(false, Some(0.25));
+    first.id = "sensor_first".into();
+    first.group = Some("sensors".into());
+    let mut second = number(false, Some(0.25));
+    second.id = "control".into();
+    second.group = Some("general".into());
+    let mut third = number(false, Some(0.25));
+    third.id = "sensor_second".into();
+    third.group = Some("sensors".into());
+    grouped.characteristics = vec![first, second, third];
+    assert!(grouped.validate().is_ok());
+    let sections = grouped.characteristic_sections();
+    assert_eq!(sections.len(), 2);
+    assert_eq!(sections[0].0.unwrap().id, "general");
+    assert_eq!(sections[0].1, vec![1]);
+    assert_eq!(sections[1].0.unwrap().id, "sensors");
+    assert_eq!(sections[1].1, vec![0, 2]);
+
+    let mut unmatched = grouped.clone();
+    unmatched.characteristics[0].group = Some("missing".into());
+    let sections = unmatched.characteristic_sections();
+    assert_eq!(sections.len(), 3);
+    assert_eq!(sections[2].0, None);
+    assert_eq!(sections[2].1, vec![0]);
+
+    let wire = serde_json::to_value(&grouped).unwrap();
+    assert_eq!(
+        wire["groups"],
+        serde_json::json!([
+            {"id":"general", "label":"General"},
+            {"id":"sensors", "label":"Sensors"}
+        ])
+    );
+    assert_eq!(wire["characteristics"][0]["group"], "sensors");
+    assert_eq!(
+        serde_json::to_value(&ungrouped).unwrap()["characteristics"][0]["group"],
+        serde_json::Value::Null
+    );
+    assert_eq!(ungrouped.characteristic_sections()[0].0, None);
+    assert_eq!(ungrouped.characteristic_sections()[0].1, vec![0]);
+}
+
+#[test]
 fn log_ring_and_error_status_mappings_are_complete() {
     let entries: Vec<_> = (0..200)
         .map(|id| LogEntry {
@@ -501,4 +628,35 @@ fn exact_wire_names_and_response_additions_survive_round_trip() {
         "log"
     );
     assert!(serde_json::from_value::<StatusResponse>(serde_json::json!({"apiVersion":1,"node":node(),"revision":"0","uptimeSeconds":4294967296_u64,"drivers":[]})).is_err());
+}
+
+#[test]
+fn characteristic_changed_event_uses_camel_case_wire_shape() {
+    let event = ServerEvent::CharacteristicChanged {
+        change: CharacteristicChange {
+            revision: "42".into(),
+            timestamp: "2026-11-01T09:08:29.123Z".into(),
+            device_id: "monitor".into(),
+            characteristic_id: "ambient_light".into(),
+            value: Some(CharacteristicValue::Number(26.0)),
+            status: CharacteristicStatus::Ok,
+            error: None,
+        },
+    };
+    event.validate().unwrap();
+    assert_eq!(
+        serde_json::to_value(event).unwrap(),
+        serde_json::json!({
+            "type": "characteristic_changed",
+            "change": {
+                "revision": "42",
+                "timestamp": "2026-11-01T09:08:29.123Z",
+                "deviceId": "monitor",
+                "characteristicId": "ambient_light",
+                "value": 26.0,
+                "status": "ok",
+                "error": null
+            }
+        })
+    );
 }

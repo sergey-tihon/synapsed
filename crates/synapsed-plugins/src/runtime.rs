@@ -20,8 +20,8 @@ use std::{
     time::{Duration, Instant},
 };
 use synapsed_api::{
-    Characteristic, CharacteristicAccess, CharacteristicCommand, CharacteristicSpec,
-    CharacteristicStatus, CharacteristicValue, Device, DeviceStatus,
+    Characteristic, CharacteristicAccess, CharacteristicCommand, CharacteristicGroup,
+    CharacteristicSpec, CharacteristicStatus, CharacteristicValue, Device, DeviceStatus,
 };
 use synapsed_core::{
     DeviceGrant, DriverError, EndpointToken, ErrorCode, OperationContext, StateStore,
@@ -237,6 +237,7 @@ impl Candidate {
         self.device.id == other.device.id
             && self.device.kind == other.device.kind
             && self.device.label == other.device.label
+            && self.device.groups == other.device.groups
             && self
                 .device
                 .characteristics
@@ -246,6 +247,7 @@ impl Candidate {
                         &characteristic.id,
                         &characteristic.label,
                         &characteristic.spec,
+                        &characteristic.group,
                         characteristic.access,
                     )
                 })
@@ -254,6 +256,7 @@ impl Candidate {
                         &characteristic.id,
                         &characteristic.label,
                         &characteristic.spec,
+                        &characteristic.group,
                         characteristic.access,
                     )
                 }))
@@ -1742,6 +1745,7 @@ fn parse_definition(
             "endpoints",
             "identityPolicy",
             "characteristics",
+            "groups",
             "pollIntervalMs",
             "onStart",
             "onRefresh",
@@ -1776,6 +1780,17 @@ fn parse_definition(
     if poll_ms.is_some_and(|ms| ms < 500) {
         return Err(invalid().into());
     }
+    let mut groups = Vec::new();
+    let groups_value: Value = table.raw_get("groups")?;
+    if !matches!(groups_value, Value::Nil) {
+        for value in array(groups_value)? {
+            let group = object(value, &["id", "label"])?;
+            groups.push(CharacteristicGroup {
+                id: decode(group.raw_get("id")?)?,
+                label: decode(group.raw_get("label")?)?,
+            });
+        }
+    }
     let (characteristics, writes) =
         parse_characteristics(table.raw_get("characteristics")?, package, registry)?;
     let device = Device {
@@ -1785,6 +1800,7 @@ fn parse_definition(
         label: decode(table.raw_get("label")?)?,
         status: DeviceStatus::Online,
         error: None,
+        groups,
         characteristics,
     };
     device.validate()?;
@@ -1820,7 +1836,7 @@ fn parse_characteristics(
     let mut characteristics = Vec::new();
     let mut writes = BTreeMap::new();
     for value in array(value)? {
-        let characteristic = object(value, &["id", "label", "spec", "access", "writes"])?;
+        let characteristic = object(value, &["id", "label", "spec", "access", "writes", "group"])?;
         let spec_table: Value = characteristic.raw_get("spec")?;
         let Value::Table(spec_object) = &spec_table else {
             return Err(invalid().into());
@@ -1864,6 +1880,7 @@ fn parse_characteristics(
         characteristics.push(Characteristic {
             id,
             label: decode(characteristic.raw_get("label")?)?,
+            group: decode(characteristic.raw_get("group")?)?,
             spec,
             access,
             value: None,

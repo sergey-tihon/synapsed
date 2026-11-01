@@ -40,6 +40,13 @@ fn fake_hardware() -> Hardware {
                 },
             ),
             (
+                0x12,
+                VcpValue {
+                    current: 50,
+                    maximum: 100,
+                },
+            ),
+            (
                 0x19,
                 VcpValue {
                     current: 2,
@@ -58,6 +65,13 @@ fn fake_hardware() -> Hardware {
                 VcpValue {
                     current: 0x0305,
                     maximum: 0x070a,
+                },
+            ),
+            (
+                0xe1,
+                VcpValue {
+                    current: 80,
+                    maximum: 0xffff,
                 },
             ),
         ]),
@@ -102,7 +116,7 @@ impl TestServer {
         let mut changed = self.store.subscribe();
         tokio::time::timeout(Duration::from_secs(8), async {
             loop {
-                let snapshot = changed.borrow_and_update().clone();
+                let snapshot = changed.borrow_and_update().snapshot().clone();
                 if predicate(&snapshot) {
                     let snapshot = snapshot.as_ref().clone();
                     snapshot.validate().unwrap();

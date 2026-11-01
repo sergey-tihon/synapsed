@@ -17,6 +17,7 @@ export type Route =
   | { page: "hardware"; filters: HardwareFilters }
   | { page: "devices" }
   | { page: "device"; deviceId: string; characteristicId: string | null }
+  | { page: "events" }
   | { page: "logs"; level: LogLevelFilter }
   | { page: "not-found" };
 
@@ -83,6 +84,7 @@ export function parseRoute(hash: string): Route {
   const search = queryAt < 0 ? "" : fragment.slice(queryAt + 1);
   if (path === "/hardware") return { page: "hardware", filters: hardwareFilters(search) };
   if (path === "/devices") return { page: "devices" };
+  if (path === "/events") return { page: "events" };
   if (path === "/logs") {
     const level = searchParams(search).get("level");
     return { page: "logs", level: logLevels.has(level as LogLevelFilter) ? (level as LogLevelFilter) : "all" };
@@ -105,6 +107,8 @@ export function href(route: Route): string {
       return "#/devices";
     case "device":
       return `#/devices/${encodeURIComponent(route.deviceId)}${route.characteristicId === null ? "" : `?characteristic=${encodeURIComponent(route.characteristicId)}`}`;
+    case "events":
+      return "#/events";
     case "logs":
       return route.level === "all" ? "#/logs" : `#/logs?level=${encodeURIComponent(route.level)}`;
     case "hardware": {

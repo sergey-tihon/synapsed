@@ -8,6 +8,7 @@ fn characteristic(spec: CharacteristicSpec) -> Characteristic {
     Characteristic {
         id: "measurement".into(),
         label: "Measurement".into(),
+        group: None,
         spec,
         access: CharacteristicAccess {
             read: false,

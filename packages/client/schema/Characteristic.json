@@ -338,6 +338,14 @@
       ],
       "description": "Optional safe description of an error."
     },
+    "group": {
+      "description": "Identifier of the device group this characteristic belongs to, if the device declares groups.",
+      "pattern": "^[a-z][a-z0-9_.-]{0,63}$",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "id": {
       "description": "Stable identifier within the device.",
       "pattern": "^[a-z][a-z0-9_.-]{0,63}$",
@@ -380,6 +388,7 @@
   "required": [
     "id",
     "label",
+    "group",
     "spec",
     "access",
     "value",

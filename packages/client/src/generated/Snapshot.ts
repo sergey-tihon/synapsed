@@ -141,6 +141,12 @@ export interface Device {
    */
   error: ApiError | null;
   /**
+   * Ordered presentation groups; empty when the device is ungrouped.
+   *
+   * @maxItems 16
+   */
+  groups: CharacteristicGroup[];
+  /**
    * Stable device identifier.
    */
   id: string;
@@ -170,6 +176,10 @@ export interface Characteristic {
    * Optional safe description of an error.
    */
   error: ApiError | null;
+  /**
+   * Identifier of the device group this characteristic belongs to, if the device declares groups.
+   */
+  group: string | null;
   /**
    * Stable identifier within the device.
    */
@@ -236,6 +246,20 @@ export interface EnumOption {
    * Serialized enum value.
    */
   value: string;
+  [k: string]: unknown | undefined;
+}
+/**
+ * Named presentation section for related characteristics of one device.
+ */
+export interface CharacteristicGroup {
+  /**
+   * Stable group identifier within the device.
+   */
+  id: string;
+  /**
+   * User-facing group label.
+   */
+  label: string;
   [k: string]: unknown | undefined;
 }
 /**

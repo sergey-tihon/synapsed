@@ -2,7 +2,9 @@
 export type { ApiError } from "./Snapshot.js";
 export type { Characteristic } from "./Characteristic.js";
 export type { CharacteristicAccess } from "./Snapshot.js";
+export type { CharacteristicChange } from "./ServerEvent.js";
 export type { CharacteristicCommand } from "./CharacteristicCommand.js";
+export type { CharacteristicGroup } from "./Snapshot.js";
 export type { CharacteristicSpec } from "./Snapshot.js";
 export type { CharacteristicStatus } from "./Snapshot.js";
 export type { CharacteristicValue } from "./Snapshot.js";

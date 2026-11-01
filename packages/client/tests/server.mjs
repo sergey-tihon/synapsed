@@ -10,6 +10,7 @@ export function characteristic(overrides = {}) {
   return {
     id: "measurement",
     label: "Measurement",
+    group: null,
     error: null,
     status: "ok",
     value: 4.5,
@@ -32,6 +33,7 @@ export function snapshot(revision = "0", instanceId = INSTANCE_A, value = 4.5) {
         label: "Instrument",
         status: "online",
         error: null,
+        groups: [],
         characteristics: [characteristic({ value })],
       },
     ],
@@ -217,7 +219,7 @@ function until(events, predicate, timeout) {
 
 export function observer(client) {
   const events = new EventEmitter();
-  const state = { snapshots: [], rings: [], liveLogs: [], statuses: [], errors: [], visibleLogs: [] };
+  const state = { snapshots: [], rings: [], liveLogs: [], changes: [], statuses: [], errors: [], visibleLogs: [] };
   const unsubscribe = client.subscribe({
     onSnapshot(value) {
       state.snapshots.push(value);
@@ -231,6 +233,10 @@ export function observer(client) {
     onLog(entry) {
       state.liveLogs.push(entry);
       state.visibleLogs = [...state.visibleLogs, entry].slice(-200);
+      events.emit("change");
+    },
+    onCharacteristicChanged(change) {
+      state.changes.push(change);
       events.emit("change");
     },
     onStatus(status) {

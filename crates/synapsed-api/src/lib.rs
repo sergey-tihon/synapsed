@@ -20,6 +20,8 @@ pub const MAX_DEVICES: usize = 64;
 pub const MAX_CHARACTERISTICS: usize = 512;
 /// Maximum characteristics on one device.
 pub const MAX_CHARACTERISTICS_PER_DEVICE: usize = 64;
+/// Maximum groups on one device.
+pub const MAX_GROUPS_PER_DEVICE: usize = 16;
 /// Maximum drivers in a snapshot.
 pub const MAX_DRIVERS: usize = 16;
 /// Maximum recent log entries.
@@ -427,6 +429,20 @@ pub enum CharacteristicStatus {
     /// The characteristic operation or observation failed.
     Error,
 }
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+/// Named presentation section for related characteristics of one device.
+pub struct CharacteristicGroup {
+    #[cfg_attr(
+        feature = "schema",
+        schemars(regex(pattern = DECLARATION_ID_PATTERN))
+    )]
+    /// Stable group identifier within the device.
+    pub id: String,
+    #[cfg_attr(feature = "schema", schemars(length(min = 1, max = 128)))]
+    /// User-facing group label.
+    pub label: String,
+}
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 /// A characteristic declaration, access policy, and optional current observation.
@@ -440,6 +456,12 @@ pub struct Characteristic {
     #[cfg_attr(feature = "schema", schemars(length(min = 1, max = 128)))]
     /// User-facing characteristic label.
     pub label: String,
+    /// Identifier of the device group this characteristic belongs to, if the device declares groups.
+    #[cfg_attr(
+        feature = "schema",
+        schemars(regex(pattern = DECLARATION_ID_PATTERN))
+    )]
+    pub group: Option<String>,
     /// Value type and metadata constraints.
     pub spec: CharacteristicSpec,
     /// Permissions granted for this characteristic.
@@ -455,6 +477,9 @@ impl Characteristic {
     /// Validate the declaration, permissions, observation, and optional error.
     pub fn validate(&self) -> ValidationResult {
         validate_id(&self.id)?;
+        if let Some(group) = &self.group {
+            validate_id(group)?;
+        }
         validate_label(&self.label)?;
         self.spec.validate()?;
         validate_error(&self.error)?;
@@ -553,6 +578,9 @@ pub struct Device {
     pub status: DeviceStatus,
     /// Optional safe description of a device-level error.
     pub error: Option<ApiError>,
+    #[cfg_attr(feature = "schema", schemars(length(max = 16)))]
+    /// Ordered presentation groups; empty when the device is ungrouped.
+    pub groups: Vec<CharacteristicGroup>,
     #[cfg_attr(feature = "schema", schemars(length(max = 64)))]
     /// Characteristics declared by the device.
     pub characteristics: Vec<Characteristic>,
@@ -568,14 +596,82 @@ impl Device {
         if self.characteristics.len() > MAX_CHARACTERISTICS_PER_DEVICE {
             return invalid("Device has too many characteristics.");
         }
+        if self.groups.len() > MAX_GROUPS_PER_DEVICE {
+            return invalid("Device has too many characteristic groups.");
+        }
+        let mut group_ids = HashSet::with_capacity(self.groups.len());
+        for group in &self.groups {
+            validate_id(&group.id)?;
+            validate_label(&group.label)?;
+            if !group_ids.insert(&group.id) {
+                return invalid("Characteristic group IDs must be unique within a device.");
+            }
+        }
         let mut seen = HashSet::with_capacity(self.characteristics.len());
+        let mut used_groups = HashSet::with_capacity(self.groups.len());
         for characteristic in &self.characteristics {
             characteristic.validate()?;
             if !seen.insert(&characteristic.id) {
                 return invalid("Characteristic IDs must be unique within a device.");
             }
+            match (&self.groups.is_empty(), &characteristic.group) {
+                (true, Some(_)) => {
+                    return invalid("Characteristic group requires declared device groups.");
+                }
+                (false, None) => {
+                    return invalid("Every characteristic must reference a declared device group.");
+                }
+                (false, Some(group)) if !group_ids.contains(group) => {
+                    return invalid("Every characteristic must reference a declared device group.");
+                }
+                (false, Some(group)) => {
+                    used_groups.insert(group.as_str());
+                }
+                (true, None) => {}
+            }
+        }
+        if !self.groups.is_empty() && used_groups.len() != self.groups.len() {
+            return invalid("Characteristic groups must not be empty.");
         }
         Ok(())
+    }
+
+    /// Presentation sections in declared group order, each listing indices into `characteristics`
+    /// in declaration order. An ungrouped device yields one `None` section, even when it has no characteristics.
+    pub fn characteristic_sections(&self) -> Vec<(Option<&CharacteristicGroup>, Vec<usize>)> {
+        if self.groups.is_empty() {
+            return vec![(None, (0..self.characteristics.len()).collect())];
+        }
+        let mut sections = Vec::with_capacity(self.groups.len() + 1);
+        for group in &self.groups {
+            let indices = self
+                .characteristics
+                .iter()
+                .enumerate()
+                .filter_map(|(index, characteristic)| {
+                    (characteristic.group.as_deref() == Some(group.id.as_str())).then_some(index)
+                })
+                .collect::<Vec<_>>();
+            if !indices.is_empty() {
+                sections.push((Some(group), indices));
+            }
+        }
+        let rest = self
+            .characteristics
+            .iter()
+            .enumerate()
+            .filter_map(|(index, characteristic)| {
+                let matched = self
+                    .groups
+                    .iter()
+                    .any(|group| characteristic.group.as_deref() == Some(group.id.as_str()));
+                (!matched).then_some(index)
+            })
+            .collect::<Vec<_>>();
+        if !rest.is_empty() {
+            sections.push((None, rest));
+        }
+        sections
     }
 }
 
@@ -820,6 +916,49 @@ impl LogsResponse {
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase")]
+/// One characteristic observation that changed between consecutive published snapshots.
+pub struct CharacteristicChange {
+    #[cfg_attr(feature = "schema", schemars(regex(pattern = DECIMAL_SEQUENCE_PATTERN)))]
+    /// Revision of the snapshot that contains the new observation.
+    pub revision: String,
+    #[cfg_attr(
+        feature = "schema",
+        schemars(
+            with = "String",
+            regex(pattern = UTC_TIMESTAMP_PATTERN)
+        )
+    )]
+    /// UTC RFC 3339 time the daemon emitted the change.
+    pub timestamp: String,
+    #[cfg_attr(feature = "schema", schemars(regex(pattern = DECLARATION_ID_PATTERN)))]
+    /// Device identifier.
+    pub device_id: String,
+    #[cfg_attr(feature = "schema", schemars(regex(pattern = DECLARATION_ID_PATTERN)))]
+    /// Characteristic identifier.
+    pub characteristic_id: String,
+    /// New observed value, if any.
+    pub value: Option<CharacteristicValue>,
+    /// New availability status.
+    pub status: CharacteristicStatus,
+    /// New safe error, if any.
+    pub error: Option<ApiError>,
+}
+impl CharacteristicChange {
+    /// Validate the revision, time, identities, value, and optional error.
+    pub fn validate(&self) -> ValidationResult {
+        validate_revision(&self.revision)?;
+        validate_timestamp(&self.timestamp)?;
+        validate_id(&self.device_id)?;
+        validate_id(&self.characteristic_id)?;
+        if let Some(value) = &self.value {
+            value.validate()?;
+        }
+        validate_error(&self.error)
+    }
+}
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(tag = "type", rename_all = "snake_case")]
 /// Event streamed by the server to an API client.
 pub enum ServerEvent {
@@ -839,6 +978,11 @@ pub enum ServerEvent {
         /// Log entry contents.
         entry: LogEntry,
     },
+    /// A characteristic observation changed.
+    CharacteristicChanged {
+        /// Change event contents.
+        change: CharacteristicChange,
+    },
 }
 impl ServerEvent {
     /// Validate the data carried by this event.
@@ -847,6 +991,7 @@ impl ServerEvent {
             Self::Snapshot { snapshot } => snapshot.validate(),
             Self::Logs { entries } => validate_logs(entries),
             Self::Log { entry } => entry.validate(),
+            Self::CharacteristicChanged { change } => change.validate(),
         }
     }
 }

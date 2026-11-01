@@ -161,6 +161,52 @@ async fn polling_observes_external_changes_without_subscribers() {
     assert!(fixture.hardware.lock().unwrap().set_calls.is_empty());
     fixture.server.shutdown().await.unwrap();
 }
+
+#[tokio::test]
+async fn polling_change_emits_characteristic_changed_after_snapshot() {
+    let mut fixture = start(&["generic-ddc"]).await;
+    fixture
+        .wait_for(|snapshot| {
+            value(snapshot, "brightness") == Some(CharacteristicValue::Number(40.0))
+        })
+        .await;
+    let (mut socket, _) = connect_async(fixture.websocket()).await.unwrap();
+    assert!(matches!(
+        next_event(&mut socket).await,
+        ServerEvent::Snapshot { .. }
+    ));
+    assert!(matches!(
+        next_event(&mut socket).await,
+        ServerEvent::Logs { .. }
+    ));
+
+    fixture.hardware.lock().unwrap().endpoints[0]
+        .replies
+        .get_mut(&0x10)
+        .unwrap()
+        .current = 55;
+
+    let mut snapshot_revisions = Vec::new();
+    let change = loop {
+        match next_event(&mut socket).await {
+            ServerEvent::Snapshot { snapshot } => snapshot_revisions.push(snapshot.revision),
+            ServerEvent::CharacteristicChanged { change } => break change,
+            _ => {}
+        }
+    };
+    assert_eq!(change.device_id, "monitor");
+    assert_eq!(change.characteristic_id, "brightness");
+    assert_eq!(change.value, Some(CharacteristicValue::Number(55.0)));
+    assert_eq!(change.status, CharacteristicStatus::Ok);
+    assert_eq!(change.error, None);
+    assert!(
+        snapshot_revisions
+            .iter()
+            .any(|revision| revision == &change.revision)
+    );
+    socket.close(None).await.unwrap();
+    fixture.server.shutdown().await.unwrap();
+}
 #[tokio::test]
 async fn packed_observations_and_coerced_readback_are_authoritative() {
     let mut fixture = start(&["generic-ddc", "benq-rd280u"]).await;

@@ -246,6 +246,14 @@ h3 {
   font-weight: 750;
   letter-spacing: 0.13em;
 }
+.characteristic-group-label {
+  margin: 12px 0 2px;
+  color: var(--muted);
+  font-size: 9px;
+  font-weight: 750;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
 .field {
   display: grid;
   gap: 6px;

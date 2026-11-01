@@ -1,4 +1,5 @@
 import { createEffect, createMemo, For, Show } from "solid-js";
+import { characteristicSections, type Characteristic } from "@synapsed/client";
 import CharacteristicCard from "../CharacteristicCard";
 import { characteristicElementId, DEFAULT_HARDWARE_FILTERS, href } from "../router";
 import { characteristicKey, useSession } from "../session";
@@ -122,39 +123,49 @@ export default function Device(props: Props) {
             </div>
             <span class="badge">{session.connection() === "connected" ? "Current" : "Stale"}</span>
           </div>
-          <div class="characteristic-grid">
-            <For each={device()?.characteristics ?? []}>
-              {(characteristic) => {
-                const key = characteristicKey(props.deviceId, characteristic.id);
-                const focusTarget = () => props.characteristicId === characteristic.id;
-                return (
-                  <CharacteristicCard
-                    deviceId={props.deviceId}
-                    characteristic={characteristic}
-                    available={
-                      session.connection() === "connected" &&
-                      device()?.status === "online" &&
-                      characteristic.status === "ok"
-                    }
-                    stale={
-                      session.connection() !== "connected" ||
-                      device()?.status !== "online" ||
-                      characteristic.status !== "ok"
-                    }
-                    pending={session.pending().has(key)}
-                    result={session.results().get(key)?.message}
-                    focusTarget={focusTarget()}
-                    execute={(command) => session.execute(props.deviceId, characteristic.id, command)}
-                  />
-                );
-              }}
-            </For>
-          </div>
-          <Show when={device()?.characteristics.length === 0}>
-            <p class="muted">This device declares no characteristics.</p>
-          </Show>
+          <For each={characteristicSections(device()?.groups ?? [], device()?.characteristics ?? [])}>
+            {(section) => {
+              const content = (
+                <>
+                  <div class="characteristic-grid">
+                    <For each={section.characteristics}>{card}</For>
+                  </div>
+                  <Show when={device()?.characteristics.length === 0}>
+                    <p class="muted">This device declares no characteristics.</p>
+                  </Show>
+                </>
+              );
+              if (!section.group) return content;
+              const id = `characteristic-group-${encodeURIComponent(props.deviceId)}-${section.group.id}`;
+              return (
+                <section class="characteristic-group" aria-labelledby={id}>
+                  <h3 id={id}>{section.group.label}</h3>
+                  {content}
+                </section>
+              );
+            }}
+          </For>
         </section>
       </Show>
     </div>
   );
+
+  function card(characteristic: Characteristic) {
+    const key = characteristicKey(props.deviceId, characteristic.id);
+    const focusTarget = () => props.characteristicId === characteristic.id;
+    return (
+      <CharacteristicCard
+        deviceId={props.deviceId}
+        characteristic={characteristic}
+        available={
+          session.connection() === "connected" && device()?.status === "online" && characteristic.status === "ok"
+        }
+        stale={session.connection() !== "connected" || device()?.status !== "online" || characteristic.status !== "ok"}
+        pending={session.pending().has(key)}
+        result={session.results().get(key)?.message}
+        focusTarget={focusTarget()}
+        execute={(command) => session.execute(props.deviceId, characteristic.id, command)}
+      />
+    );
+  }
 }

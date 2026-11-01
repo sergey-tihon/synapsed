@@ -26,6 +26,7 @@ export type InspectorSpec =
 export type InspectorCharacteristic = {
   id: string;
   label: string;
+  group: string | null;
   spec: InspectorSpec;
   access: { read: boolean; write: boolean; notify: boolean };
   value: CharacteristicValue | null;
@@ -64,6 +65,7 @@ export function inspectorCharacteristic(characteristic: Characteristic | undefin
   return {
     id: characteristic.id,
     label: characteristic.label,
+    group: characteristic.group,
     spec: metadata,
     access: {
       read: characteristic.access.read,
@@ -98,6 +100,7 @@ export function buildCatalog(
     label: device.label,
     kind: device.kind,
     driver: device.driver,
+    groups: device.groups.map(({ id, label }) => ({ id, label })),
     status: device.status,
     characteristics: device.characteristics.map((characteristic) => inspectorCharacteristic(characteristic)),
   }));

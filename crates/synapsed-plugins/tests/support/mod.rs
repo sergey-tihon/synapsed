@@ -92,7 +92,9 @@ impl Screen {
     pub fn benq() -> Self {
         let values = [
             (16, (40, 100)),
+            (18, (50, 100)),
             (25, (2, 5)),
+            (225, (80, 0xFFFF)),
             (215, (0x0120, 0x0231)),
             (217, (0x0305, 0x070a)),
             (32, (125, 1000)),
@@ -198,7 +200,7 @@ impl Harness {
         let mut changed = self.store.subscribe();
         tokio::time::timeout(Duration::from_secs(12), async {
             loop {
-                let snapshot = changed.borrow_and_update().clone();
+                let snapshot = changed.borrow_and_update().snapshot().clone();
                 if condition(&snapshot) {
                     return snapshot;
                 }

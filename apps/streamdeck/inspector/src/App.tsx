@@ -1,5 +1,10 @@
 import { createEffect, createMemo, createSignal, For, Show } from "solid-js";
-import { formatCharacteristicValue, type Characteristic, type Snapshot } from "@synapsed/client";
+import {
+  characteristicSections,
+  formatCharacteristicValue,
+  type Characteristic,
+  type Snapshot,
+} from "@synapsed/client";
 import { renderDisplay } from "../../src/render.js";
 import { selectionFromSettings, type InspectorCatalog, type Selection } from "../../src/protocol.js";
 import type { InspectorCharacteristic } from "../../src/catalog.js";
@@ -258,14 +263,34 @@ export default function App() {
               >
                 <option value="">Select characteristic</option>
                 <For
-                  each={catalog()?.devices.find((device) => device.id === selected().deviceId)?.characteristics ?? []}
-                >
-                  {(characteristic) => (
-                    <option value={characteristic.id}>
-                      {characteristic.label}
-                      {!characteristic.access.write ? " · read only" : ""}
-                    </option>
+                  each={characteristicSections(
+                    catalog()?.devices.find((device) => device.id === selected().deviceId)?.groups ?? [],
+                    catalog()?.devices.find((device) => device.id === selected().deviceId)?.characteristics ?? [],
                   )}
+                >
+                  {(section) =>
+                    section.group ? (
+                      <optgroup label={section.group.label}>
+                        <For each={section.characteristics}>
+                          {(characteristic) => (
+                            <option value={characteristic.id}>
+                              {characteristic.label}
+                              {!characteristic.access.write ? " · read only" : ""}
+                            </option>
+                          )}
+                        </For>
+                      </optgroup>
+                    ) : (
+                      <For each={section.characteristics}>
+                        {(characteristic) => (
+                          <option value={characteristic.id}>
+                            {characteristic.label}
+                            {!characteristic.access.write ? " · read only" : ""}
+                          </option>
+                        )}
+                      </For>
+                    )
+                  }
                 </For>
                 <Show when={selected().characteristicId && !selectedPrimary()}>
                   <option value={selected().characteristicId}>
@@ -275,36 +300,52 @@ export default function App() {
               </select>
             </label>
             <div class="characteristic-list" aria-label="Characteristics for selected device">
-              <For each={catalog()?.devices.find((device) => device.id === selected().deviceId)?.characteristics ?? []}>
-                {(characteristic) => (
-                  <button
-                    type="button"
-                    class={`characteristic-option ${selected().characteristicId === characteristic.id ? "selected" : ""}`}
-                    aria-pressed={selected().characteristicId === characteristic.id ? "true" : "false"}
-                    onClick={() => updatePrimary(selected().deviceId, characteristic.id)}
-                  >
-                    <span class="kind-icon" aria-hidden="true">
-                      {kindIcon(characteristic.spec.kind)}
-                    </span>
-                    <span class="characteristic-info">
-                      <strong>{characteristic.label}</strong>
-                      <small>
-                        {currentValue(characteristic)} · {characteristic.access.write ? "Writable" : "Read only"}
-                      </small>
-                    </span>
-                    <span class="characteristic-value">{currentValue(characteristic)}</span>
-                    <Show
-                      when={
-                        characteristic.status !== "ok" ||
-                        catalog()?.devices.find((device) => device.id === selected().deviceId)?.status !== "online"
-                      }
-                    >
-                      <span class="unavailable">Unavailable</span>
+              <For
+                each={characteristicSections(
+                  catalog()?.devices.find((device) => device.id === selected().deviceId)?.groups ?? [],
+                  catalog()?.devices.find((device) => device.id === selected().deviceId)?.characteristics ?? [],
+                )}
+              >
+                {(section) => (
+                  <>
+                    <Show when={section.group}>
+                      <p class="characteristic-group-label">{section.group?.label}</p>
                     </Show>
-                  </button>
+                    <For each={section.characteristics}>
+                      {(characteristic) => (
+                        <button
+                          type="button"
+                          class={`characteristic-option ${selected().characteristicId === characteristic.id ? "selected" : ""}`}
+                          aria-pressed={selected().characteristicId === characteristic.id ? "true" : "false"}
+                          onClick={() => updatePrimary(selected().deviceId, characteristic.id)}
+                        >
+                          <span class="kind-icon" aria-hidden="true">
+                            {kindIcon(characteristic.spec.kind)}
+                          </span>
+                          <span class="characteristic-info">
+                            <strong>{characteristic.label}</strong>
+                            <small>
+                              {currentValue(characteristic)} · {characteristic.access.write ? "Writable" : "Read only"}
+                            </small>
+                          </span>
+                          <span class="characteristic-value">{currentValue(characteristic)}</span>
+                          <Show
+                            when={
+                              characteristic.status !== "ok" ||
+                              catalog()?.devices.find((device) => device.id === selected().deviceId)?.status !==
+                                "online"
+                            }
+                          >
+                            <span class="unavailable">Unavailable</span>
+                          </Show>
+                        </button>
+                      )}
+                    </For>
+                  </>
                 )}
               </For>
             </div>
+            [apps/streamdeck/inspector/src/App.tsx#F5C5]
           </section>
           <CommandEditor
             label="Key / dial behavior"
@@ -364,16 +405,35 @@ export default function App() {
                 >
                   <option value="">Select characteristic</option>
                   <For
-                    each={
-                      catalog()?.devices.find((device) => device.id === selected().pressDeviceId)?.characteristics ?? []
-                    }
-                  >
-                    {(characteristic) => (
-                      <option value={characteristic.id}>
-                        {characteristic.label}
-                        {!characteristic.access.write ? " · read only" : ""}
-                      </option>
+                    each={characteristicSections(
+                      catalog()?.devices.find((device) => device.id === selected().pressDeviceId)?.groups ?? [],
+                      catalog()?.devices.find((device) => device.id === selected().pressDeviceId)?.characteristics ??
+                        [],
                     )}
+                  >
+                    {(section) =>
+                      section.group ? (
+                        <optgroup label={section.group.label}>
+                          <For each={section.characteristics}>
+                            {(characteristic) => (
+                              <option value={characteristic.id}>
+                                {characteristic.label}
+                                {!characteristic.access.write ? " · read only" : ""}
+                              </option>
+                            )}
+                          </For>
+                        </optgroup>
+                      ) : (
+                        <For each={section.characteristics}>
+                          {(characteristic) => (
+                            <option value={characteristic.id}>
+                              {characteristic.label}
+                              {!characteristic.access.write ? " · read only" : ""}
+                            </option>
+                          )}
+                        </For>
+                      )
+                    }
                   </For>
                   <Show when={selected().pressCharacteristicId && !selectedPress()}>
                     <option value={selected().pressCharacteristicId}>
