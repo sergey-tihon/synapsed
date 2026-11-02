@@ -1,4 +1,6 @@
 local monitor = require("generic-ddc.monitor")
+local features = require("generic-ddc.features")
+local probed = {}
 
 local BLUE = 0x19
 local SWITCH = 0xD7
@@ -8,6 +10,79 @@ local LEVEL_MAXIMUM = 0x070A
 local CONTRAST = 0x12
 local AMBIENT = 0xE1
 local AMBIENT_MAXIMUM = 0xFFFF
+local CONTRAST_FEATURE
+for _, feature in ipairs(features.OPTIONAL) do
+  if feature.id == "contrast" then
+    CONTRAST_FEATURE = feature
+    break
+  end
+end
+assert(CONTRAST_FEATURE, "Generic MCCS catalog is missing Contrast.")
+local function find_entry(entries, id)
+  for _, entry in ipairs(entries) do
+    if entry.feature.id == id then
+      return entry
+    end
+  end
+  return nil
+end
+
+local function standard_entries(ctx, endpoint, brightness_maximum, contrast_maximum)
+  local entries = {
+    { feature = features.BRIGHTNESS, maximum = brightness_maximum },
+    { feature = CONTRAST_FEATURE, maximum = contrast_maximum },
+  }
+  local identity = endpoint.identity
+  local identified = type(identity) == "string" and identity ~= ""
+  local cached = identified and probed[identity] or nil
+  if identified and not cached then
+    cached = {}
+    probed[identity] = cached
+  end
+  local optional = {}
+  for _, feature in ipairs(features.OPTIONAL) do
+    if feature.id ~= "contrast" then
+      local entry = cached and cached[feature.id] or nil
+      if not entry then
+        local err
+        entry, err = features.probe(ctx, endpoint, feature)
+        if err then
+          return nil, err
+        end
+        if entry and cached then
+          cached[feature.id] = entry
+        end
+      end
+      if entry then
+        optional[#optional + 1] = entry
+      end
+    end
+  end
+  for _, entry in ipairs(optional) do
+    entries[#entries + 1] = entry
+  end
+  return entries, nil
+end
+
+local function groups(entries)
+  local result = {
+    { id = "general", label = "General" },
+    { id = "moonhalo", label = "MoonHalo" },
+    { id = "sensors", label = "Sensors" },
+  }
+  local used = {}
+  for _, entry in ipairs(entries) do
+    if entry.feature.id ~= "brightness" and entry.feature.id ~= "contrast" then
+      used[entry.feature.group] = true
+    end
+  end
+  for _, group in ipairs(features.GROUPS) do
+    if used[group.id] then
+      result[#result + 1] = group
+    end
+  end
+  return result
+end
 
 local function failure(code, message)
   return { code = code, message = message }
@@ -90,26 +165,24 @@ local function field_update(id, reading, err)
   return update(id, value, field_error)
 end
 
-local function refresh(ctx, endpoint)
-  local brightness, brightness_error = monitor.read_brightness(ctx, endpoint)
-  local contrast, contrast_error = monitor.read_level(ctx, endpoint, CONTRAST, "Contrast")
-  local blue, blue_error = read_register(ctx, endpoint, BLUE, 5)
+local function refresh(ctx, endpoint, entries)
+  local updates = {}
+  for _, entry in ipairs(entries) do
+    updates[#updates + 1] = features.observe(ctx, endpoint, entry)
+  end
+
   -- Each packed register is sampled once; its fields share the same observation.
+  local blue, blue_error = read_register(ctx, endpoint, BLUE, 5)
   local switch, switch_error = read_register(ctx, endpoint, SWITCH, SWITCH_MAXIMUM)
   local level, level_error = read_register(ctx, endpoint, LEVEL, LEVEL_MAXIMUM)
   local ambient, ambient_error = read_register(ctx, endpoint, AMBIENT, AMBIENT_MAXIMUM)
-  return {
-    updates = {
-      update("brightness", brightness and brightness.current or nil, brightness_error),
-      update("contrast", contrast and contrast.current or nil, contrast_error),
-      field_update("low_blue_light", blue, blue_error),
-      field_update("moonhalo.power", switch, switch_error),
-      field_update("moonhalo.brightness", level, level_error),
-      field_update("moonhalo.color_temperature", level, level_error),
-      field_update("moonhalo.light_mode", switch, switch_error),
-      update("ambient_light", ambient and ambient.current or nil, ambient_error),
-    },
-  }
+  updates[#updates + 1] = field_update("low_blue_light", blue, blue_error)
+  updates[#updates + 1] = field_update("moonhalo.power", switch, switch_error)
+  updates[#updates + 1] = field_update("moonhalo.brightness", level, level_error)
+  updates[#updates + 1] = field_update("moonhalo.color_temperature", level, level_error)
+  updates[#updates + 1] = field_update("moonhalo.light_mode", switch, switch_error)
+  updates[#updates + 1] = update("ambient_light", ambient and ambient.current or nil, ambient_error)
+  return { updates = updates }
 end
 
 local function number_definition(id, label, maximum, code, mask)
@@ -129,10 +202,16 @@ local function number_definition(id, label, maximum, code, mask)
   }
 end
 
-local function characteristics(brightness_maximum, contrast_maximum)
-  return {
-    in_group("general", monitor.brightness_definition(brightness_maximum)),
-    in_group("general", monitor.level_definition("contrast", "Contrast", CONTRAST, contrast_maximum)),
+local function characteristics(entries)
+  local result = {}
+  for _, entry in ipairs(entries) do
+    local definition = features.definition(entry)
+    if entry.feature.id == "brightness" or entry.feature.id == "contrast" then
+      definition.group = "general"
+    end
+    result[#result + 1] = definition
+  end
+  local vendor = {
     in_group("general", number_definition("low_blue_light", "Low Blue Light", 5, BLUE, 0xFFFF)),
     in_group("moonhalo", {
       id = "moonhalo.power",
@@ -168,6 +247,10 @@ local function characteristics(brightness_maximum, contrast_maximum)
       writes = {},
     },
   }
+  for _, definition in ipairs(vendor) do
+    result[#result + 1] = definition
+  end
+  return result
 end
 
 local function stepped_value(steps, current, minimum, maximum)
@@ -233,11 +316,6 @@ local function mode_target(command, current, raw, maximum)
 end
 
 local function write(ctx, endpoint, id, command)
-  if id == "brightness" then
-    return monitor.write_brightness(ctx, endpoint, command)
-  elseif id == "contrast" then
-    return monitor.write_level(ctx, endpoint, CONTRAST, "Contrast", command)
-  end
   local code, maximum
   if id == "low_blue_light" then
     code, maximum = BLUE, 5
@@ -350,6 +428,11 @@ return {
           end
           return { error = contrast_error }
         end
+        local entries, entries_error = standard_entries(ctx, endpoint, candidate.brightness.maximum, contrast.maximum)
+        if entries_error then
+          return { error = entries_error }
+        end
+        local device_groups = groups(entries)
 
         return {
           devices = {
@@ -359,17 +442,23 @@ return {
               label = "BenQ RD280U",
               endpoints = { endpoint },
               identityPolicy = "same",
-              groups = {
-                { id = "general", label = "General" },
-                { id = "moonhalo", label = "MoonHalo" },
-                { id = "sensors", label = "Sensors" },
-              },
-              characteristics = characteristics(candidate.brightness.maximum, contrast.maximum),
+              groups = device_groups,
+              characteristics = characteristics(entries),
               pollIntervalMs = 2000,
               onRefresh = function(refresh_ctx)
-                return refresh(refresh_ctx, endpoint)
+                if type(refresh_ctx.confirm) == "string" then
+                  local entry = find_entry(entries, refresh_ctx.confirm)
+                  if entry then
+                    return { updates = { features.observe(refresh_ctx, endpoint, entry) } }
+                  end
+                end
+                return refresh(refresh_ctx, endpoint, entries)
               end,
               onWrite = function(write_ctx, characteristic_id, command)
+                local entry = find_entry(entries, characteristic_id)
+                if entry then
+                  return features.write(write_ctx, endpoint, entry, command)
+                end
                 return write(write_ctx, endpoint, characteristic_id, command)
               end,
             },
