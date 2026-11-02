@@ -40,20 +40,26 @@ return {
         }
         local identity = endpoint.identity
         local identified = type(identity) == "string" and identity ~= ""
-        local optional = identified and probed[identity] or nil
-        if not optional then
-          optional = {}
-          for _, feature in ipairs(features.OPTIONAL) do
-            local entry, probe_error = features.probe(ctx, endpoint, feature)
+        local cached = identified and probed[identity] or nil
+        if identified and not cached then
+          cached = {}
+          probed[identity] = cached
+        end
+        local optional = {}
+        for _, feature in ipairs(features.OPTIONAL) do
+          local entry = cached and cached[feature.id] or nil
+          if not entry then
+            local probe_error
+            entry, probe_error = features.probe(ctx, endpoint, feature)
             if probe_error then
               return { error = probe_error }
             end
-            if entry then
-              optional[#optional + 1] = entry
+            if entry and cached then
+              cached[feature.id] = entry
             end
           end
-          if identified then
-            probed[identity] = optional
+          if entry then
+            optional[#optional + 1] = entry
           end
         end
         for _, entry in ipairs(optional) do

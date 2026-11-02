@@ -34,22 +34,28 @@ local function standard_entries(ctx, endpoint, brightness_maximum, contrast_maxi
   }
   local identity = endpoint.identity
   local identified = type(identity) == "string" and identity ~= ""
-  local optional = identified and probed[identity] or nil
-  if not optional then
-    optional = {}
-    for _, feature in ipairs(features.OPTIONAL) do
-      if feature.id ~= "contrast" then
-        local entry, err = features.probe(ctx, endpoint, feature)
+  local cached = identified and probed[identity] or nil
+  if identified and not cached then
+    cached = {}
+    probed[identity] = cached
+  end
+  local optional = {}
+  for _, feature in ipairs(features.OPTIONAL) do
+    if feature.id ~= "contrast" then
+      local entry = cached and cached[feature.id] or nil
+      if not entry then
+        local err
+        entry, err = features.probe(ctx, endpoint, feature)
         if err then
           return nil, err
         end
-        if entry then
-          optional[#optional + 1] = entry
+        if entry and cached then
+          cached[feature.id] = entry
         end
       end
-    end
-    if identified then
-      probed[identity] = optional
+      if entry then
+        optional[#optional + 1] = entry
+      end
     end
   end
   for _, entry in ipairs(optional) do
@@ -440,6 +446,12 @@ return {
               characteristics = characteristics(entries),
               pollIntervalMs = 2000,
               onRefresh = function(refresh_ctx)
+                if type(refresh_ctx.confirm) == "string" then
+                  local entry = find_entry(entries, refresh_ctx.confirm)
+                  if entry then
+                    return { updates = { features.observe(refresh_ctx, endpoint, entry) } }
+                  end
+                end
                 return refresh(refresh_ctx, endpoint, entries)
               end,
               onWrite = function(write_ctx, characteristic_id, command)

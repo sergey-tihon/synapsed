@@ -275,22 +275,40 @@ function features.write(ctx, endpoint, entry, command)
     end
     return nil
   elseif feature.kind == "choice" then
-    if command.op ~= "set" then
-      return error_result(failure("unsupported_operation", feature.label .. " accepts only set commands."))
-    end
-    local selected = nil
-    for _, option in ipairs(feature.options) do
-      if option.value == command.value then
-        selected = option
-        break
-      end
-    end
-    if not selected then
-      return error_result(failure("invalid_value", feature.label .. " must be one of its declared options."))
-    end
     local raw, err = ctx.capabilities.ddc:get_vcp(endpoint, feature.code)
     if err then
       return error_result(err)
+    end
+    local selected = nil
+    if command.op == "set" then
+      for _, option in ipairs(feature.options) do
+        if option.value == command.value then
+          selected = option
+          break
+        end
+      end
+      if not selected then
+        return error_result(failure("invalid_value", feature.label .. " must be one of its declared options."))
+      end
+    elseif command.op == "step" then
+      if type(command.steps) ~= "number" or command.steps % 1 ~= 0 then
+        return error_result(failure("invalid_value", feature.label .. " step must be an integer."))
+      end
+      local current = raw.current & 0x00FF
+      local index = nil
+      for option_index, option in ipairs(feature.options) do
+        if option.code == current then
+          index = option_index
+          break
+        end
+      end
+      if not index then
+        return error_result(failure("ddc_error", feature.label .. " reports a value outside the MCCS standard table."))
+      end
+      local target = math.max(1, math.min(#feature.options, index + command.steps))
+      selected = feature.options[target]
+    else
+      return error_result(failure("unsupported_operation", feature.label .. " accepts only set and step commands."))
     end
     local requested = (raw.current & 0xFF00) | selected.code
     if requested ~= raw.current then

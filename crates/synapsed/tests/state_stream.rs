@@ -300,7 +300,7 @@ async fn failed_fresh_read_never_writes_and_later_observation_recovers() {
     fixture.server.shutdown().await.unwrap();
 }
 #[tokio::test]
-async fn vendor_failure_retains_healthy_brightness_through_lua_refresh() {
+async fn brightness_confirmation_reads_only_target_when_vendor_register_fails() {
     let mut fixture = start(&["generic-ddc", "benq-rd280u"]).await;
     fixture
         .wait_for(|snapshot| {
@@ -311,6 +311,7 @@ async fn vendor_failure_retains_healthy_brightness_through_lua_refresh() {
                 && value(snapshot, "brightness").is_some()
         })
         .await;
+    let get_count = fixture.hardware.lock().unwrap().get_calls.len();
     fixture.hardware.lock().unwrap().fail_reads.insert(0xd9);
     let response = fixture
         .execute("brightness", serde_json::json!({"op":"set","value":52}))
@@ -336,7 +337,7 @@ async fn vendor_failure_retains_healthy_brightness_through_lua_refresh() {
             .status,
         CharacteristicStatus::Ok
     );
-    assert_ne!(
+    assert_eq!(
         monitor
             .characteristics
             .iter()
@@ -345,5 +346,11 @@ async fn vendor_failure_retains_healthy_brightness_through_lua_refresh() {
             .status,
         CharacteristicStatus::Ok
     );
+    {
+        let state = fixture.hardware.lock().unwrap();
+        let confirmed_reads = &state.get_calls[get_count..];
+        assert!(!confirmed_reads.is_empty());
+        assert!(confirmed_reads.iter().all(|call| call.1 == 0x10));
+    }
     fixture.server.shutdown().await.unwrap();
 }
