@@ -220,7 +220,14 @@ end"#,
             })
         })
         .await;
-    assert_eq!(snapshot.devices[0].characteristics.len(), 1);
+    assert_eq!(
+        snapshot.devices[0]
+            .characteristics
+            .iter()
+            .map(|characteristic| characteristic.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["brightness", "contrast"]
+    );
     let snapshot = harness
         .host
         .dispatch(

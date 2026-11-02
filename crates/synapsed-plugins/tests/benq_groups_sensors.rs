@@ -170,3 +170,90 @@ async fn benq_ambient_range_failure_isolated_and_contrast_is_fingerprint() {
     assert_eq!(snapshot.devices[0].driver, "generic-ddc");
     harness.stop().await;
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn benq_extends_the_generic_mccs_catalog() {
+    let packages = catalog(&["generic-ddc", "benq-rd280u"]);
+    let mut screen = Screen::mccs();
+    screen.name = Some("BenQ RD280U".into());
+    screen.values.extend(Screen::benq().values);
+    let harness = Harness::start(packages.path(), Hardware::new(vec![screen]));
+    let snapshot = harness.until(benq_snapshot).await;
+    let device = &snapshot.devices[0];
+    assert_eq!(
+        device
+            .characteristics
+            .iter()
+            .map(|characteristic| characteristic.id.as_str())
+            .take(14)
+            .collect::<Vec<_>>(),
+        vec![
+            "brightness",
+            "contrast",
+            "sharpness",
+            "color_preset",
+            "red_gain",
+            "green_gain",
+            "blue_gain",
+            "red_black_level",
+            "green_black_level",
+            "blue_black_level",
+            "volume",
+            "mute",
+            "input_source",
+            "power_mode",
+        ]
+    );
+    assert_eq!(
+        device
+            .groups
+            .iter()
+            .map(|group| group.id.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            "general", "moonhalo", "sensors", "picture", "color", "audio", "system"
+        ]
+    );
+    assert_eq!(
+        value(&snapshot, "color_preset"),
+        &CharacteristicValue::String("6500k".into())
+    );
+    assert_eq!(
+        value(&snapshot, "mute"),
+        &CharacteristicValue::Boolean(false)
+    );
+    assert_eq!(
+        value(&snapshot, "input_source"),
+        &CharacteristicValue::String("dp1".into())
+    );
+    assert_eq!(
+        value(&snapshot, "power_mode"),
+        &CharacteristicValue::String("on".into())
+    );
+    assert_eq!(
+        value(&snapshot, "moonhalo.power"),
+        &CharacteristicValue::Boolean(true)
+    );
+    assert_eq!(
+        value(&snapshot, "ambient_light"),
+        &CharacteristicValue::Number(80.0)
+    );
+    let snapshot = harness
+        .host
+        .dispatch(
+            "monitor",
+            "volume",
+            CharacteristicCommand::Step { steps: -1 },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        value(&snapshot, "volume"),
+        &CharacteristicValue::Number(25.0)
+    );
+    let state = harness.hardware.state.lock().unwrap();
+    let (screen, code, raw) = state.set_calls.last().unwrap();
+    assert_eq!((screen.as_str(), *code, *raw), ("screen-a", 0x62, 25));
+    drop(state);
+    harness.stop().await;
+}

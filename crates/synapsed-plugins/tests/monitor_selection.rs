@@ -7,6 +7,9 @@ use support::*;
 use synapsed_api::{CharacteristicCommand, CharacteristicValue, DeviceStatus, DriverState};
 use synapsed_core::{DriverError, ErrorCode};
 
+const GENERIC_CODES: [u8; 14] = [
+    0x10, 0x12, 0x14, 0x16, 0x18, 0x1A, 0x60, 0x62, 0x6C, 0x6E, 0x70, 0x87, 0x8D, 0xD6,
+];
 #[tokio::test(flavor = "current_thread")]
 async fn monitor_selection_zero_one_multiple_and_denied() {
     for count in [0, 1, 2] {
@@ -37,7 +40,7 @@ async fn monitor_selection_zero_one_multiple_and_denied() {
                 .unwrap()
                 .get_calls
                 .iter()
-                .all(|call| call.1 == 16)
+                .all(|call| GENERIC_CODES.contains(&call.1))
         );
         harness.stop().await;
     }
@@ -394,7 +397,7 @@ async fn monitor_selection_slot_rebinds_changed_identity_after_fresh_observation
             .unwrap()
             .get_calls
             .iter()
-            .all(|call| call.1 == 16)
+            .all(|call| GENERIC_CODES.contains(&call.1))
     );
     harness.stop().await;
 }

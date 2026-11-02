@@ -276,7 +276,9 @@ struct Definition {
 #[derive(Clone)]
 enum CallbackKind<'a> {
     Observe,
-    Refresh,
+    Refresh {
+        confirm: Option<&'a str>,
+    },
     Write {
         characteristic: &'a str,
         command: CharacteristicCommand,
@@ -289,7 +291,7 @@ impl CallbackKind<'_> {
         matches!(self, Self::Write { .. } | Self::Stop)
     }
     fn is_refresh(&self) -> bool {
-        matches!(self, Self::Refresh)
+        matches!(self, Self::Refresh { .. })
     }
 }
 struct Timer {
@@ -761,7 +763,7 @@ impl Vm {
                 self.callback(&id, start, &operation, CallbackKind::Observe)
                     .await?;
             }
-            self.refresh(&id, &operation).await
+            self.refresh(&id, &operation, None).await
         }
         .await;
         if result.is_err() {
@@ -831,6 +833,12 @@ impl Vm {
         );
         invocation.write_allowed = write;
         let context = self.lua.create_table()?;
+        if let CallbackKind::Refresh {
+            confirm: Some(characteristic),
+        } = &kind
+        {
+            context.raw_set("confirm", *characteristic)?;
+        }
         context.raw_set(
             "capabilities",
             self.registry
@@ -866,7 +874,7 @@ impl Vm {
                 )
                 .await
             }
-            CallbackKind::Observe | CallbackKind::Refresh | CallbackKind::Stop => {
+            CallbackKind::Observe | CallbackKind::Refresh { .. } | CallbackKind::Stop => {
                 guarded(
                     &self.budget,
                     guard.clone(),
@@ -1062,7 +1070,13 @@ impl Vm {
         }
         if refresh
             && device.characteristics.iter().any(|characteristic| {
-                characteristic.access.read && !observed.contains(&characteristic.id)
+                characteristic.access.read
+                    && match kind {
+                        CallbackKind::Refresh { confirm: Some(id) } => {
+                            characteristic.id == *id && !observed.contains(&characteristic.id)
+                        }
+                        _ => !observed.contains(&characteristic.id),
+                    }
             })
         {
             return Err(invalid().into());
@@ -1086,10 +1100,15 @@ impl Vm {
             .extend(subscriptions.borrow_mut().drain(..));
         Ok(value)
     }
-    async fn refresh(&mut self, id: &str, operation: &OperationContext) -> Result<Device, Failure> {
+    async fn refresh(
+        &mut self,
+        id: &str,
+        operation: &OperationContext,
+        confirm: Option<&str>,
+    ) -> Result<Device, Failure> {
         let refresh = self.active[id].definition.refresh.clone();
         match self
-            .callback(id, refresh, operation, CallbackKind::Refresh)
+            .callback(id, refresh, operation, CallbackKind::Refresh { confirm })
             .await
         {
             Ok(_) => {
@@ -1221,7 +1240,9 @@ impl Vm {
         {
             selected.status = CharacteristicStatus::Unavailable;
         }
-        let device = self.refresh(id, &operation).await?;
+        let confirm =
+            (!matches!(command, CharacteristicCommand::Invoke {})).then_some(characteristic);
+        let device = self.refresh(id, &operation, confirm).await?;
         if !matches!(command, CharacteristicCommand::Invoke {})
             && device
                 .characteristics
@@ -1413,7 +1434,7 @@ impl Vm {
             .candidate
             .poll_ms
             .expect("poll interval");
-        let result = self.refresh(id, operation).await;
+        let result = self.refresh(id, operation, None).await;
         self.active.get_mut(id).expect("active device").poll_at =
             Some(Instant::now() + Duration::from_millis(u64::from(ms)));
         result

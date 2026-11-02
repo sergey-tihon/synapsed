@@ -119,6 +119,34 @@ impl Screen {
             values,
         }
     }
+    #[allow(dead_code)]
+    pub fn mccs() -> Self {
+        let values = [
+            (0x10, (40, 100)),
+            (0x12, (50, 100)),
+            (0x87, (5, 10)),
+            (0x14, (0x0005, 0x000D)),
+            (0x16, (50, 100)),
+            (0x18, (50, 100)),
+            (0x1A, (50, 100)),
+            (0x6C, (50, 100)),
+            (0x6E, (50, 100)),
+            (0x70, (50, 100)),
+            (0x62, (30, 100)),
+            (0x8D, (0x0102, 0x0002)),
+            (0x60, (0x010F, 0x0012)),
+            (0xD6, (0x0001, 0x0005)),
+        ]
+        .into_iter()
+        .map(|(code, (current, maximum))| (code, VcpValue { current, maximum }))
+        .collect();
+        Self {
+            key: "screen-a".into(),
+            identity: Some("c".repeat(64)),
+            name: Some("Generic Monitor".into()),
+            values,
+        }
+    }
 }
 pub fn root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")

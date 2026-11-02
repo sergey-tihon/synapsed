@@ -1,24 +1,22 @@
 local monitor = require("monitor")
+local features = require("features")
+local probed = {}
 
-local function refresh(ctx, endpoint)
-  local reading, err = monitor.read_brightness(ctx, endpoint)
-  if err then
-    return {
-      updates = {
-        {
-          id = "brightness",
-          status = err.code == "device_unavailable" and "unavailable" or "error",
-          value = nil,
-          error = err,
-        },
-      },
-    }
+local function find_entry(entries, id)
+  for _, entry in ipairs(entries) do
+    if entry.feature.id == id then
+      return entry
+    end
   end
-  return {
-    updates = {
-      { id = "brightness", status = "ok", value = reading.current, error = nil },
-    },
-  }
+  return nil
+end
+
+local function updates(ctx, endpoint, entries)
+  local result = {}
+  for _, entry in ipairs(entries) do
+    result[#result + 1] = features.observe(ctx, endpoint, entry)
+  end
+  return result
 end
 
 return {
@@ -35,7 +33,46 @@ return {
         if not candidate then
           return { devices = {} }
         end
+
         local endpoint = candidate.endpoint
+        local entries = {
+          { feature = features.BRIGHTNESS, maximum = candidate.brightness.maximum },
+        }
+        local identity = endpoint.identity
+        local identified = type(identity) == "string" and identity ~= ""
+        local optional = identified and probed[identity] or nil
+        if not optional then
+          optional = {}
+          for _, feature in ipairs(features.OPTIONAL) do
+            local entry, probe_error = features.probe(ctx, endpoint, feature)
+            if probe_error then
+              return { error = probe_error }
+            end
+            if entry then
+              optional[#optional + 1] = entry
+            end
+          end
+          if identified then
+            probed[identity] = optional
+          end
+        end
+        for _, entry in ipairs(optional) do
+          entries[#entries + 1] = entry
+        end
+
+        local characteristics = {}
+        local used_groups = {}
+        for _, entry in ipairs(entries) do
+          characteristics[#characteristics + 1] = features.definition(entry)
+          used_groups[entry.feature.group] = true
+        end
+        local groups = {}
+        for _, group in ipairs(features.GROUPS) do
+          if used_groups[group.id] then
+            groups[#groups + 1] = group
+          end
+        end
+
         return {
           devices = {
             {
@@ -44,15 +81,21 @@ return {
               label = "Monitor",
               endpoints = { endpoint },
               identityPolicy = "slot",
-              characteristics = {
-                monitor.brightness_definition(candidate.brightness.maximum),
-              },
+              groups = groups,
+              characteristics = characteristics,
               pollIntervalMs = 2000,
               onRefresh = function(refresh_ctx)
-                return refresh(refresh_ctx, endpoint)
+                if type(refresh_ctx.confirm) == "string" then
+                  local confirmed = find_entry(entries, refresh_ctx.confirm)
+                  if confirmed then
+                    return { updates = { features.observe(refresh_ctx, endpoint, confirmed) } }
+                  end
+                end
+                return { updates = updates(refresh_ctx, endpoint, entries) }
               end,
               onWrite = function(write_ctx, characteristic_id, command)
-                if characteristic_id ~= "brightness" then
+                local entry = find_entry(entries, characteristic_id)
+                if not entry then
                   return {
                     error = {
                       code = "unknown_characteristic",
@@ -60,7 +103,7 @@ return {
                     },
                   }
                 end
-                return monitor.write_brightness(write_ctx, endpoint, command)
+                return features.write(write_ctx, endpoint, entry, command)
               end,
             },
           },

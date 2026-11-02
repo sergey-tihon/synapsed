@@ -6,5 +6,10 @@
   "dependencies": [],
   "supersedes": [],
   "capabilities": { "ddc": 1 },
-  "permissions": { "ddc": { "read": [16], "write": [16] } }
+  "permissions": {
+    "ddc": {
+      "read": [16, 18, 20, 22, 24, 26, 96, 98, 108, 110, 112, 135, 141, 214],
+      "write": [16, 18, 20, 22, 24, 26, 96, 98, 108, 110, 112, 135, 141]
+    }
+  }
 }
