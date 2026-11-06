@@ -3,6 +3,7 @@ updates:
   - package-ecosystem: cargo
     directory: /
     schedule: { interval: weekly, day: monday }
+    versioning-strategy: lockfile-only
     open-pull-requests-limit: 10
     groups:
       rust-async: { patterns: ["tokio*", "axum*", "reqwest", "futures-*", "bytes", "hyper*"] }
