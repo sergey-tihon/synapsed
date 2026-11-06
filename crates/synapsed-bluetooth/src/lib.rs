@@ -592,10 +592,10 @@ impl Owner {
                     }
                 }
                 event = event_rx.recv() => {
-                    if let Some(event) = event {
-                        if let Ok(backend) = backend.as_mut() {
-                            self.handle_event(backend, event);
-                        }
+                    if let Some(event) = event
+                        && let Ok(backend) = backend.as_mut()
+                    {
+                        self.handle_event(backend, event);
                     }
                 }
                 result = connect_rx.recv() => {
