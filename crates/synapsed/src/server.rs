@@ -554,12 +554,7 @@ fn describe_command(command: &CharacteristicCommand) -> String {
         CharacteristicCommand::Set { value } => match value {
             CharacteristicValue::Number(number) => format!("set {number}"),
             CharacteristicValue::Boolean(value) => format!("set {value}"),
-            CharacteristicValue::String(value) => {
-                format!(
-                    "set {}",
-                    serde_json::to_string(value).expect("strings serialize")
-                )
-            }
+            CharacteristicValue::String(_) => "set (string value omitted)".to_owned(),
         },
         CharacteristicCommand::Step { steps } => format!("step {steps:+}"),
         CharacteristicCommand::Toggle {} => "toggle".to_owned(),
@@ -760,5 +755,20 @@ async fn stream_events(socket: WebSocket, application: Application) {
                 Err(broadcast::error::RecvError::Closed) => break,
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn string_set_audit_description_omits_the_value() {
+        assert_eq!(
+            describe_command(&CharacteristicCommand::Set {
+                value: CharacteristicValue::String("private note".to_owned()),
+            }),
+            "set (string value omitted)"
+        );
     }
 }

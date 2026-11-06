@@ -7,6 +7,8 @@ import {
   type Device,
   type Snapshot,
 } from "@synapsed/client";
+import type { InspectorCharacteristic } from "./catalog.js";
+import type { InspectorDevice } from "./protocol.js";
 import type { FeedbackPayload } from "@elgato/streamdeck";
 import { keyEligible, rotateEligible } from "./eligibility.js";
 import {
@@ -35,7 +37,13 @@ export function readingText(characteristic: Characteristic): string {
   return formatCharacteristicValue(characteristic);
 }
 
-function unavailableText(device: Device, characteristic: Characteristic): string | undefined {
+function unavailableText(
+  device: { status: Device["status"]; error?: Device["error"] },
+  characteristic: {
+    status: Characteristic["status"];
+    error: Characteristic["error"] | InspectorCharacteristic["error"];
+  },
+): string | undefined {
   const error = device.error ?? characteristic.error;
   if (error?.code === "driver_conflict" || error?.code === "ambiguous_device") return "Driver conflict";
   if (device.status !== "online") return "Device unavailable";
@@ -66,6 +74,17 @@ function serviceState(connection: ClientStatus): string | undefined {
   if (connection === "connecting") return "Connecting";
   if (connection === "disconnected") return "Service Offline";
   return undefined;
+}
+
+export function inspectorReading(
+  connection: ClientStatus,
+  device: InspectorDevice,
+  characteristic: InspectorCharacteristic,
+): string {
+  const value = formatCharacteristicValue(characteristic as unknown as Characteristic);
+  const problem = serviceState(connection) ?? unavailableText(device, characteristic);
+  if (!problem) return `Current: ${value}`;
+  return characteristic.value === null ? problem : `Last known: ${value} (stale) · ${problem}`;
 }
 
 function renderParts(
@@ -104,7 +123,11 @@ function renderParts(
       const unavailable = service ?? unavailableText(device, characteristic);
       if (!eligible(characteristic)) {
         valueLine = "Unsupported";
-      } else if (commandRequired && (!command || !isCommandApplicable(characteristic, command))) {
+      } else if (
+        commandRequired &&
+        characteristic.access.write &&
+        (!command || !isCommandApplicable(characteristic, command))
+      ) {
         valueLine = "Choose action";
       } else if (unavailable) {
         valueLine =

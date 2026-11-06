@@ -206,7 +206,7 @@ export class Contexts {
     try {
       // Accepted HTTP observations pass through the shared client's ordering gate/subscription.
       // Never render the initiating response: a later WS observation may already be current.
-      streamDeck.logger.info(`Sending ${JSON.stringify(command)} to ${binding.deviceId}/${binding.characteristicId}`);
+      streamDeck.logger.info(`Sending ${command.op} to ${binding.deviceId}/${binding.characteristicId}`);
       await this.client.execute(binding.deviceId, binding.characteristicId, command, { signal: controller.signal });
     } catch (error) {
       if (context.active && !controller.signal.aborted) {

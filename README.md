@@ -130,7 +130,7 @@ IDs come from the current catalog, not a reserved monitor slot. `set` parses the
 
 Open the downloaded `.streamDeckPlugin` with Stream Deck. Remove the old **Monitor Control** plugin so it cannot remain another hardware writer, then re-add actions; old UUIDs/settings are not aliased or automatically migrated. For source link/watch commands, see [CONTRIBUTE.md](CONTRIBUTE.md#stream-deck-from-source).
 
-Add **Synapsed → Characteristic**, then explicitly choose device/characteristic in the dynamic inspector. Unbound displays Configure; removed/inapplicable bindings send nothing. Keys default to step +1, boolean toggle or action invoke where metadata allows; configure step -1 for decrease. Dial rotation sends signed ticks. For MoonHalo, bind a brightness/color-temperature/light-mode primary and an optional `moonhalo.power` press binding with toggle. Dials show metadata-derived min/current/max/bar; read-only/string/action values do not invent numeric ranges.
+Add **Synapsed → Key** or **Synapsed → Dial**, then explicitly choose device/characteristic in the dynamic inspector. Unbound displays Configure; removed/inapplicable bindings send nothing. Keys default to step +1, boolean toggle or action invoke where metadata allows; configure step -1 for decrease. Read-only characteristics can be bound to keys as display-only. Dial rotation sends signed ticks. For MoonHalo, bind a brightness/color-temperature/light-mode primary and an optional same-device `moonhalo.power` press characteristic with toggle. Dials show metadata-derived min/current/max/bar; read-only/string/action values do not invent numeric ranges.
 
 ### macOS menu bar
 

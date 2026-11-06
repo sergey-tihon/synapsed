@@ -1,11 +1,13 @@
-import { characteristicSections, formatCharacteristicValue, type Characteristic } from "@synapsed/client";
+import { characteristicSections, type ClientStatus } from "@synapsed/client";
 import { createEffect, For, Show, type Accessor } from "solid-js";
 import type { InspectorCharacteristic } from "../../../src/catalog.js";
 import type { InspectorDevice } from "../../../src/protocol.js";
+import { inspectorReading } from "../../../src/render.js";
 
 type Props = {
   label: string;
   devices: Accessor<InspectorDevice[]>;
+  connection: Accessor<ClientStatus>;
   eligible: (characteristic: InspectorCharacteristic) => boolean;
   deviceId: Accessor<string | undefined>;
   characteristicId: Accessor<string | undefined>;
@@ -109,7 +111,7 @@ export default function BindingPicker(props: Props) {
       </label>
       <Show when={selectedCharacteristic()}>
         {(characteristic) => (
-          <p class="observed">Current: {formatCharacteristicValue(characteristic() as unknown as Characteristic)}</p>
+          <p class="observed">{inspectorReading(props.connection(), selectedDevice()!, characteristic())}</p>
         )}
       </Show>
     </div>

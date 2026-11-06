@@ -58,6 +58,7 @@ export default function DialInspector() {
         <p class="muted">Each tick steps the value by one step.</p>
         <BindingPicker
           label="Characteristic"
+          connection={() => bridge.catalog()?.connection ?? "connecting"}
           devices={devices}
           eligible={rotateEligible}
           deviceId={() => settings().deviceId}
@@ -80,6 +81,7 @@ export default function DialInspector() {
           <h2>Press</h2>
           <BindingPicker
             label="Press characteristic"
+            connection={() => bridge.catalog()?.connection ?? "connecting"}
             devices={() => {
               const device = selectedDevice();
               return device ? [device] : [];

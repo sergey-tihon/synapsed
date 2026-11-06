@@ -53,6 +53,7 @@ export default function KeyInspector() {
         <BindingPicker
           label="Characteristic"
           devices={devices}
+          connection={() => bridge.catalog()?.connection ?? "connecting"}
           eligible={keyEligible}
           deviceId={() => settings().deviceId}
           characteristicId={() => settings().characteristicId}

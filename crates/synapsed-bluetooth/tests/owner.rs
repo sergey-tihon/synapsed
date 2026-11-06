@@ -137,19 +137,12 @@ async fn matching_advertisements_are_returned_and_nonmatches_are_ignored() {
 }
 
 #[tokio::test]
-async fn connect_reports_pending_then_ready_and_surfaces_the_previous_failure() {
-    let state = state_with(vec![peripheral("desk-key", "Desk 1")]);
+async fn rejected_advertisements_release_backend_state() {
+    let state = state_with(vec![
+        peripheral("desk-key", "Desk 1"),
+        peripheral("lamp", "Lamp"),
+    ]);
     let client = start_client(&state);
-    let endpoint = enumerate(&client).await;
-    connect(&client, endpoint).await;
-    {
-        let mut state = state.lock().unwrap();
-        state.fail_connect = true;
-        state.peripherals[0].name = Some("Desk 1".to_owned());
-    }
-    // Link loss creates a fresh endpoint generation for the reconnect attempt.
-    drop_link(&state, "desk-key");
-    tokio::time::sleep(Duration::from_millis(30)).await;
     let scan = client
         .enumerate(ScanFilter {
             services: vec![],
@@ -157,12 +150,75 @@ async fn connect_reports_pending_then_ready_and_surfaces_the_previous_failure() 
         })
         .await
         .unwrap();
-    let endpoint = scan.endpoints[0].token;
+    assert_eq!(state.lock().unwrap().forgotten, vec!["lamp".to_owned()]);
+    assert_eq!(scan.endpoints.len(), 1);
+    client
+        .shutdown(Instant::now() + Duration::from_secs(1))
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn connect_reports_pending_then_ready_and_surfaces_the_previous_failure() {
+    let state = state_with(vec![peripheral("desk-key", "Desk 1")]);
+    let client = start_client(&state);
+    let endpoint = enumerate(&client).await;
+    connect(&client, endpoint).await;
+    let connected = endpoint;
+    let gate = Arc::new(tokio::sync::Semaphore::new(0));
+    {
+        let mut state = state.lock().unwrap();
+        state.fail_connect = true;
+        state.connect_gate = Some(gate.clone());
+    }
+    // Link loss creates a fresh endpoint generation for the reconnect attempt.
+    drop_link(&state, "desk-key");
+    let endpoint = tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            let scan = client
+                .enumerate(ScanFilter {
+                    services: vec![],
+                    name_prefixes: vec!["Desk".to_owned()],
+                })
+                .await
+                .unwrap();
+            let endpoint = scan.endpoints[0].token;
+            if endpoint != connected {
+                break endpoint;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
     assert!(!client.connect(endpoint).await.unwrap());
-    tokio::time::sleep(Duration::from_millis(30)).await;
-    let error = client.connect(endpoint).await.unwrap_err();
+    gate.add_permits(1);
+
+    async fn connect_failure(
+        client: &BluetoothClient,
+        endpoint: EndpointToken,
+    ) -> synapsed_core::DriverError {
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                match client.connect(endpoint).await {
+                    Ok(false) => tokio::time::sleep(Duration::from_millis(5)).await,
+                    Ok(true) => panic!("unexpected connection"),
+                    Err(error) => break error,
+                }
+            }
+        })
+        .await
+        .unwrap()
+    }
+
+    let error = connect_failure(&client, endpoint).await;
     assert_eq!(error.code, ErrorCode::BluetoothError);
     assert!(!client.connect(endpoint).await.unwrap());
+    gate.add_permits(1);
+    let error = connect_failure(&client, endpoint).await;
+    assert_eq!(error.code, ErrorCode::BluetoothError);
+    assert_eq!(state.lock().unwrap().connects, 3);
+    gate.close();
     client
         .shutdown(Instant::now() + Duration::from_secs(1))
         .await

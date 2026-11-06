@@ -1,6 +1,7 @@
 type Eligible = { access: { write: boolean }; spec: { kind: string; step?: number | null } };
 
-export const keyEligible = (characteristic: Eligible): boolean => characteristic.access.write;
+export const keyEligible = (characteristic: Eligible): boolean =>
+  characteristic.access.write || characteristic.spec.kind !== "action";
 
 export const rotateEligible = (characteristic: Eligible): boolean =>
   characteristic.access.write &&

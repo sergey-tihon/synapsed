@@ -72,20 +72,22 @@ impl BluetoothBackend for NativeBackend {
                             let Ok(peripheral) = adapter.peripheral(&id).await else {
                                 continue;
                             };
-                            peripherals
-                                .borrow_mut()
-                                .insert(key.clone(), peripheral.clone());
                             let properties = peripheral.properties().await.ok().flatten();
                             let name = properties
                                 .as_ref()
                                 .and_then(|value| value.local_name.clone());
                             let services =
                                 properties.map(|value| value.services).unwrap_or_default();
-                            let _ = events.try_send(BackendEvent::Advertisement {
-                                key,
-                                name,
-                                services,
-                            });
+                            if events
+                                .try_send(BackendEvent::Advertisement {
+                                    key: key.clone(),
+                                    name,
+                                    services,
+                                })
+                                .is_ok()
+                            {
+                                peripherals.borrow_mut().insert(key, peripheral);
+                            }
                         }
                         _ => {}
                     }
@@ -95,6 +97,10 @@ impl BluetoothBackend for NativeBackend {
         })
     }
 
+    fn forget(&mut self, key: &str) {
+        self.peripherals.borrow_mut().remove(key);
+        self.characteristics.borrow_mut().remove(key);
+    }
     fn connect(&mut self, key: &str) -> BackendFuture<()> {
         let key = key.to_owned();
         let peripheral = self.peripherals.borrow().get(&key).cloned();

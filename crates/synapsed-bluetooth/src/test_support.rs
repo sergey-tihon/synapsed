@@ -7,7 +7,7 @@ use std::{
     time::Instant,
 };
 use synapsed_core::{DriverError, ErrorCode};
-use tokio::sync::mpsc;
+use tokio::sync::{Semaphore, mpsc};
 
 /// Shared fake state inspected and controlled by tests.
 pub type FakeStateHandle = Arc<Mutex<FakeState>>;
@@ -47,8 +47,12 @@ pub struct FakeState {
     pub connects: usize,
     /// Make connect attempts fail.
     pub fail_connect: bool,
+    /// When set, each connect attempt waits for one permit before completing.
+    pub connect_gate: Option<Arc<Semaphore>>,
     /// Make characteristic writes fail.
     pub fail_writes: bool,
+    /// Keys released by the owner.
+    pub forgotten: Vec<String>,
     /// Event channel installed when scanning starts.
     pub events: Option<mpsc::Sender<BackendEvent>>,
 }
@@ -93,10 +97,25 @@ impl BluetoothBackend for FakeBackend {
             Ok(())
         })
     }
+    fn forget(&mut self, key: &str) {
+        lock(&self.state).forgotten.push(key.to_owned());
+    }
 
     fn connect(&mut self, _key: &str) -> BackendFuture<()> {
         let state = self.state.clone();
         Box::pin(async move {
+            let gate = lock(&state).connect_gate.clone();
+            if let Some(gate) = gate {
+                match gate.acquire().await {
+                    Ok(permit) => permit.forget(),
+                    Err(_) => {
+                        return Err(DriverError::new(
+                            ErrorCode::BluetoothError,
+                            "Fake Bluetooth connection gate closed.",
+                        ));
+                    }
+                }
+            }
             let mut state = lock(&state);
             state.connects += 1;
             if state.fail_connect {

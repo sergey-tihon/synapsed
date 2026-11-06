@@ -295,6 +295,72 @@ async fn idasen_height_moves_and_stop_ends_repeated_reference_writes() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn idasen_set_at_current_height_cancels_the_active_move() {
+    let packages = package_dir();
+    let state = fake_state(&[("desk-key", "Desk 1234")]);
+    let (host, store) = start_host(packages.path(), &state, BTreeMap::new(), false);
+    until(&store, |snapshot| {
+        snapshot.devices.iter().any(|device| device.id == "desk")
+    })
+    .await;
+
+    tokio::time::timeout(
+        Duration::from_secs(1),
+        host.dispatch(
+            "desk",
+            "height",
+            CharacteristicCommand::Set {
+                value: CharacteristicValue::Number(110.0),
+            },
+        ),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(
+        writes(&state)
+            .iter()
+            .filter(|write| write.0 == REFERENCE && write.1 == TARGET_110)
+            .count()
+            >= 2
+    );
+
+    tokio::time::timeout(
+        Duration::from_secs(1),
+        host.dispatch(
+            "desk",
+            "height",
+            CharacteristicCommand::Set {
+                value: CharacteristicValue::Number(72.0),
+            },
+        ),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            let current = writes(&state);
+            if current.ends_with(&[
+                (COMMAND, vec![0xFF, 0x00], current[current.len() - 2].2),
+                (REFERENCE, vec![0x01, 0x80], current[current.len() - 1].2),
+            ]) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+
+    let ended = writes(&state);
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(writes(&state), ended);
+    shutdown(host).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn idasen_ambiguous_names_require_a_setting() {
     let packages = package_dir();
     let state = fake_state(&[("desk-a", "Desk 1234"), ("desk-b", "Desk 5678")]);

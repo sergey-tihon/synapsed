@@ -278,14 +278,13 @@ return {
                   target_cm = math.max(MIN_CM, math.min(MAX_CM, cm(current) + command.steps))
                 end
                 local target = raw_for(target_cm)
-                if math.abs(target - current) <= TOLERANCE_RAW then
-                  move = nil
-                  return nil
-                end
-
                 local _, stop_error = write_bt:stop_repeat(endpoint)
                 if stop_error then
                   return { error = stop_error }
+                end
+                move = nil
+                if math.abs(target - current) <= TOLERANCE_RAW then
+                  return nil
                 end
                 local _, wake_error = write_bt:write(endpoint, "command", WAKE)
                 if wake_error then

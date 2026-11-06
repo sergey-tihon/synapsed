@@ -127,6 +127,8 @@ pub trait BluetoothBackend {
     fn start_scan(&mut self, events: mpsc::Sender<BackendEvent>) -> BackendFuture<()>;
     /// Connect, discover services, and start notification forwarding.
     fn connect(&mut self, key: &str) -> BackendFuture<()>;
+    /// Release backend state for a peripheral the owner does not track.
+    fn forget(&mut self, key: &str);
     /// Disconnect a peripheral.
     fn disconnect(&mut self, key: &str) -> BackendFuture<()>;
     /// Read a characteristic value.
@@ -591,7 +593,9 @@ impl Owner {
                 }
                 event = event_rx.recv() => {
                     if let Some(event) = event {
-                        self.handle_event(event);
+                        if let Ok(backend) = backend.as_mut() {
+                            self.handle_event(backend, event);
+                        }
                     }
                 }
                 result = connect_rx.recv() => {
@@ -711,7 +715,7 @@ impl Owner {
             backend.start_scan(event_tx.clone()).await?;
             self.scan_started = true;
             while let Ok(event) = event_rx.try_recv() {
-                self.handle_event(event);
+                self.handle_event(backend, event);
             }
         }
         let mut endpoints: Vec<_> = self
@@ -947,7 +951,7 @@ impl Owner {
             })
     }
 
-    fn handle_event(&mut self, event: BackendEvent) {
+    fn handle_event(&mut self, backend: &mut impl BluetoothBackend, event: BackendEvent) {
         match event {
             BackendEvent::Advertisement {
                 key,
@@ -959,6 +963,9 @@ impl Owner {
                     .iter()
                     .any(|filter| filter_matches(filter, &name, &services))
                 {
+                    if !self.peripherals.contains_key(&key) {
+                        backend.forget(&key);
+                    }
                     return;
                 }
                 let now = Instant::now();
@@ -987,6 +994,7 @@ impl Owner {
                     );
                 } else {
                     self.overflow = true;
+                    backend.forget(&key);
                 }
             }
             BackendEvent::Disconnected { key } => {

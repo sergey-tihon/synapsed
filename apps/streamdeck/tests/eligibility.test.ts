@@ -11,9 +11,10 @@ const withoutStep = () => {
 };
 
 describe("action characteristic eligibility", () => {
-  it("requires write access for every action kind", () => {
+  it("allows read-only values on keys but requires write access for actions, rotation and press", () => {
     const readOnly = characteristic("number", 50, "ok", false);
-    expect(keyEligible(readOnly)).toBe(false);
+    expect(keyEligible(readOnly)).toBe(true);
+    expect(keyEligible(characteristic("action", null, "ok", false))).toBe(false);
     expect(rotateEligible(readOnly)).toBe(false);
     expect(pressEligible(readOnly)).toBe(false);
   });

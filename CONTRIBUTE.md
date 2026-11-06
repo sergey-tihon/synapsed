@@ -112,7 +112,7 @@ npm run validate
 npm run pack:plugin
 ```
 
-The bundle is `apps/streamdeck/com.sergey-tihon.synapsed.sdPlugin`. Add Synapsed → Characteristic and explicitly bind declared IDs in the dynamic inspector; no unbound first-monitor default exists. Primary rotation uses signed ticks and metadata-supported steps. Optional secondary press bindings support, for example, `moonhalo.power` toggle. Inspector catalogs flow through the plugin's shared daemon client, not another socket or hardware access. Keep action handlers, manifest controllers/encoder, layout visibility and typed inspector settings aligned. SDPI v4.0.1 is not published on npm: [official setup](https://sdpi-components.dev/docs/getting-started/get-started) distributes a local JS download. Keep the exact committed file for reproducible offline bundles, preserving licensing and actual datasource/hot-reload APIs.
+The bundle is `apps/streamdeck/com.sergey-tihon.synapsed.sdPlugin`. Add Synapsed → Key or Synapsed → Dial and explicitly bind declared IDs in the dynamic inspector; no unbound first-monitor default exists. Primary rotation uses signed ticks and metadata-supported steps. Optional same-device Dial press bindings support, for example, `moonhalo.power` toggle. Inspector catalogs flow through the plugin's shared daemon client, not another socket or hardware access. Keep action handlers, manifest controllers/encoder, layout visibility and typed inspector settings aligned. SDPI v4.0.1 is not published on npm: [official setup](https://sdpi-components.dev/docs/getting-started/get-started) distributes a local JS download. Keep the exact committed file for reproducible offline bundles, preserving licensing and actual datasource/hot-reload APIs.
 
 ## macOS tray from source
 
