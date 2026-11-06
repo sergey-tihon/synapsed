@@ -295,6 +295,64 @@ async fn idasen_height_moves_and_stop_ends_repeated_reference_writes() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn idasen_restart_waits_for_active_move_final_writes() {
+    let packages = package_dir();
+    let state = fake_state(&[("desk-key", "Desk 1234")]);
+    let (host, store) = start_host(packages.path(), &state, BTreeMap::new(), false);
+    until(&store, |snapshot| {
+        snapshot.devices.iter().any(|device| device.id == "desk")
+    })
+    .await;
+
+    tokio::time::timeout(
+        Duration::from_secs(1),
+        host.dispatch(
+            "desk",
+            "height",
+            CharacteristicCommand::Set {
+                value: CharacteristicValue::Number(110.0),
+            },
+        ),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(
+        writes(&state)
+            .iter()
+            .filter(|write| write.0 == REFERENCE && write.1 == TARGET_110)
+            .count()
+            >= 2
+    );
+
+    tokio::time::timeout(Duration::from_secs(5), host.restart_driver("ikea-idasen"))
+        .await
+        .unwrap()
+        .unwrap();
+    let restarted = writes(&state);
+    assert!(restarted.ends_with(&[
+        (COMMAND, vec![0xFF, 0x00], restarted[restarted.len() - 2].2),
+        (
+            REFERENCE,
+            vec![0x01, 0x80],
+            restarted[restarted.len() - 1].2
+        ),
+    ]));
+    assert_eq!(
+        restarted
+            .iter()
+            .filter(|write| write.0 == REFERENCE && write.1 == vec![0x01, 0x80])
+            .count(),
+        1
+    );
+
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(writes(&state), restarted);
+    shutdown(host).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn idasen_set_at_current_height_cancels_the_active_move() {
     let packages = package_dir();
     let state = fake_state(&[("desk-key", "Desk 1234")]);

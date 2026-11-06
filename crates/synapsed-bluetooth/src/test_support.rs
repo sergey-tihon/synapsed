@@ -87,17 +87,18 @@ impl BluetoothBackend for FakeBackend {
                     })
                     .collect::<Vec<_>>()
             };
-            for (key, name, services) in peripherals {
+            for ((key, name, services), sequence) in peripherals.into_iter().zip(0_u64..) {
                 let _ = events.try_send(BackendEvent::Advertisement {
                     key,
                     name,
                     services,
+                    sequence,
                 });
             }
             Ok(())
         })
     }
-    fn forget(&mut self, key: &str) {
+    fn forget(&mut self, key: &str, _sequence: u64) {
         lock(&self.state).forgotten.push(key.to_owned());
     }
 

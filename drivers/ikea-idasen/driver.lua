@@ -310,7 +310,8 @@ return {
                 }
                 return nil
               end,
-              onStop = function()
+              onStop = function(stop_ctx)
+                stop_ctx.capabilities.bluetooth:stop_repeat(endpoint)
                 move = nil
               end,
             },

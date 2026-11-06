@@ -101,6 +101,8 @@ pub enum BackendEvent {
         name: Option<String>,
         /// Advertised service UUIDs.
         services: Vec<Uuid>,
+        /// Backend-assigned order of this advertisement, passed back to [`BluetoothBackend::forget`].
+        sequence: u64,
     },
     /// A connected peripheral disconnected.
     Disconnected {
@@ -127,8 +129,8 @@ pub trait BluetoothBackend {
     fn start_scan(&mut self, events: mpsc::Sender<BackendEvent>) -> BackendFuture<()>;
     /// Connect, discover services, and start notification forwarding.
     fn connect(&mut self, key: &str) -> BackendFuture<()>;
-    /// Release backend state for a peripheral the owner does not track.
-    fn forget(&mut self, key: &str);
+    /// Release backend state for an untracked peripheral unless a newer advertisement for it is queued.
+    fn forget(&mut self, key: &str, sequence: u64);
     /// Disconnect a peripheral.
     fn disconnect(&mut self, key: &str) -> BackendFuture<()>;
     /// Read a characteristic value.
@@ -957,6 +959,7 @@ impl Owner {
                 key,
                 name,
                 services,
+                sequence,
             } => {
                 if !self
                     .filters
@@ -964,7 +967,7 @@ impl Owner {
                     .any(|filter| filter_matches(filter, &name, &services))
                 {
                     if !self.peripherals.contains_key(&key) {
-                        backend.forget(&key);
+                        backend.forget(&key, sequence);
                     }
                     return;
                 }
@@ -994,7 +997,7 @@ impl Owner {
                     );
                 } else {
                     self.overflow = true;
-                    backend.forget(&key);
+                    backend.forget(&key, sequence);
                 }
             }
             BackendEvent::Disconnected { key } => {

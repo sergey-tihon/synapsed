@@ -10,9 +10,54 @@ use futures_util::StreamExt;
 use std::{cell::RefCell, collections::HashMap, rc::Rc};
 use tokio::sync::mpsc;
 
+/// Peripheral handles tagged with the sequence of their latest queued advertisement.
+struct PeripheralCache<T> {
+    next_sequence: u64,
+    entries: HashMap<String, (u64, T)>,
+}
+
+impl<T> PeripheralCache<T> {
+    fn new() -> Self {
+        Self {
+            next_sequence: 0,
+            entries: HashMap::new(),
+        }
+    }
+
+    /// Reserve the sequence for the next advertisement sent to the owner.
+    fn next_sequence(&mut self) -> u64 {
+        let sequence = self.next_sequence;
+        self.next_sequence = self.next_sequence.wrapping_add(1);
+        sequence
+    }
+
+    fn insert(&mut self, key: String, sequence: u64, value: T) {
+        self.entries.insert(key, (sequence, value));
+    }
+
+    fn get(&self, key: &str) -> Option<&T> {
+        self.entries.get(key).map(|(_, value)| value)
+    }
+
+    /// Remove `key` only when `sequence` is still its latest queued advertisement.
+    fn forget(&mut self, key: &str, sequence: u64) -> bool {
+        if self
+            .entries
+            .get(key)
+            .is_some_and(|(latest, _)| *latest == sequence)
+        {
+            self.entries.remove(key);
+            true
+        } else {
+            false
+        }
+    }
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 pub(super) struct NativeBackend {
     adapter: Rc<RefCell<Option<Adapter>>>,
-    peripherals: Rc<RefCell<HashMap<String, Peripheral>>>,
+    peripherals: Rc<RefCell<PeripheralCache<Peripheral>>>,
     characteristics: Rc<RefCell<HashMap<String, Vec<Characteristic>>>>,
     events: Rc<RefCell<Option<mpsc::Sender<BackendEvent>>>>,
 }
@@ -21,7 +66,7 @@ impl NativeBackend {
     pub(super) fn new() -> Result<Self, DriverError> {
         Ok(Self {
             adapter: Rc::new(RefCell::new(None)),
-            peripherals: Rc::new(RefCell::new(HashMap::new())),
+            peripherals: Rc::new(RefCell::new(PeripheralCache::new())),
             characteristics: Rc::new(RefCell::new(HashMap::new())),
             events: Rc::new(RefCell::new(None)),
         })
@@ -61,9 +106,15 @@ impl BluetoothBackend for NativeBackend {
                 while let Some(event) = stream.next().await {
                     match event {
                         CentralEvent::DeviceDisconnected(id) => {
-                            let _ = events.try_send(BackendEvent::Disconnected {
-                                key: id.to_string(),
-                            });
+                            if events
+                                .send(BackendEvent::Disconnected {
+                                    key: id.to_string(),
+                                })
+                                .await
+                                .is_err()
+                            {
+                                break;
+                            }
                         }
                         CentralEvent::DeviceDiscovered(id)
                         | CentralEvent::DeviceUpdated(id)
@@ -78,15 +129,17 @@ impl BluetoothBackend for NativeBackend {
                                 .and_then(|value| value.local_name.clone());
                             let services =
                                 properties.map(|value| value.services).unwrap_or_default();
+                            let sequence = peripherals.borrow_mut().next_sequence();
                             if events
                                 .try_send(BackendEvent::Advertisement {
                                     key: key.clone(),
                                     name,
                                     services,
+                                    sequence,
                                 })
                                 .is_ok()
                             {
-                                peripherals.borrow_mut().insert(key, peripheral);
+                                peripherals.borrow_mut().insert(key, sequence, peripheral);
                             }
                         }
                         _ => {}
@@ -97,10 +150,12 @@ impl BluetoothBackend for NativeBackend {
         })
     }
 
-    fn forget(&mut self, key: &str) {
-        self.peripherals.borrow_mut().remove(key);
-        self.characteristics.borrow_mut().remove(key);
+    fn forget(&mut self, key: &str, sequence: u64) {
+        if self.peripherals.borrow_mut().forget(key, sequence) {
+            self.characteristics.borrow_mut().remove(key);
+        }
     }
+
     fn connect(&mut self, key: &str) -> BackendFuture<()> {
         let key = key.to_owned();
         let peripheral = self.peripherals.borrow().get(&key).cloned();
@@ -247,4 +302,24 @@ fn peripheral_unavailable() -> DriverError {
 
 fn bluetooth_error(message: &'static str) -> DriverError {
     DriverError::new(ErrorCode::BluetoothError, message)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::PeripheralCache;
+
+    #[test]
+    fn forget_keeps_an_entry_replaced_by_a_newer_advertisement() {
+        let mut cache = PeripheralCache::new();
+        let first = cache.next_sequence();
+        cache.insert("desk".to_owned(), first, "old");
+
+        let second = cache.next_sequence();
+        cache.insert("desk".to_owned(), second, "new");
+
+        assert!(!cache.forget("desk", first));
+        assert_eq!(cache.get("desk"), Some(&"new"));
+        assert!(cache.forget("desk", second));
+        assert_eq!(cache.get("desk"), None);
+    }
 }
