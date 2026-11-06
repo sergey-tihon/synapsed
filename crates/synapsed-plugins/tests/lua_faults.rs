@@ -179,7 +179,7 @@ async fn lua_faults_partial_native_failure_never_publishes_requested_string() {
     harness.stop().await;
 }
 #[tokio::test(flavor = "current_thread")]
-async fn lua_faults_quarantined_benq_recovers_only_through_fresh_generic_lua() {
+async fn lua_faults_quarantined_benq_recovers_after_runtime_restart() {
     let packages = catalog(&["generic-ddc", "benq-rd280u"]);
     let entry = packages.path().join("benq-rd280u/driver.lua");
     transform_discovery(
@@ -240,6 +240,32 @@ end"#,
     assert_eq!(
         value(&snapshot, "brightness"),
         &CharacteristicValue::Number(71.0)
+    );
+    let writes_before_restart = harness.hardware.state.lock().unwrap().set_calls.clone();
+    harness.hardware.mutate(16, 40);
+    let restarted = harness.host.restart_driver("benq-rd280u").await.unwrap();
+    assert_eq!(restarted.devices[0].driver, "benq-rd280u");
+    assert_eq!(
+        restarted
+            .drivers
+            .iter()
+            .find(|driver| driver.id == "benq-rd280u")
+            .unwrap()
+            .state,
+        DriverState::Online
+    );
+    assert_eq!(
+        harness.hardware.state.lock().unwrap().set_calls,
+        writes_before_restart
+    );
+    assert_eq!(
+        harness
+            .host
+            .restart_driver("not-installed")
+            .await
+            .unwrap_err()
+            .code,
+        ErrorCode::UnknownDriver
     );
     harness.stop().await;
 }

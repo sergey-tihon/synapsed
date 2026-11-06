@@ -1,14 +1,25 @@
 import {
-  defaultCommand,
   formatCharacteristicValue,
   isCommandApplicable,
   type Characteristic,
+  type CharacteristicCommand,
   type ClientStatus,
   type Device,
   type Snapshot,
 } from "@synapsed/client";
 import type { FeedbackPayload } from "@elgato/streamdeck";
-import { settingsConform, type ActionSettings, type Binding } from "./settings.js";
+import { keyEligible, rotateEligible } from "./eligibility.js";
+import {
+  customTitle,
+  dialSettingsConform,
+  keyBinding,
+  keySettingsConform,
+  pressBinding,
+  rotateBinding,
+  type Binding,
+  type DialSettings,
+  type KeySettings,
+} from "./settings.js";
 
 export function resolveBinding(
   snapshot: Snapshot | undefined,
@@ -39,63 +50,73 @@ export type DisplayFeedback = {
   maximum: { value: string; enabled: boolean };
   bar: { value: number; enabled: boolean };
 };
-export type Display = { title: string; feedback: DisplayFeedback };
 
-export function renderDisplay(
-  settings: ActionSettings,
+type RenderParts = {
+  header: string[];
+  valueLine?: string;
+  resolved?: { device: Device; characteristic: Characteristic };
+  minimum: string;
+  maximum: string;
+  percent: number;
+  bounded: boolean;
+};
+
+function serviceState(connection: ClientStatus): string | undefined {
+  if (connection === "incompatible") return "Incompatible";
+  if (connection === "connecting") return "Connecting";
+  if (connection === "disconnected") return "Service Offline";
+  return undefined;
+}
+
+function renderParts(
+  settings: { title?: string },
+  conform: boolean,
+  binding: Binding | undefined,
   snapshot: Snapshot | undefined,
   connection: ClientStatus,
   pending: boolean,
-): Display {
-  let label = "Synapsed";
-  let current = "Configure";
-  let state: string | undefined;
+  eligible: (characteristic: Characteristic) => boolean,
+  command?: CharacteristicCommand,
+  commandRequired = false,
+): RenderParts {
+  const title = customTitle(settings);
+  let header = ["Synapsed"];
+  let valueLine: string | undefined = "Configure";
+  let resolved: RenderParts["resolved"];
   let minimum = "";
   let maximum = "";
   let percent = 0;
   let bounded = false;
-  if (!settingsConform(settings)) {
-    current = "Unsupported";
-  } else if (!settings.binding) {
-    current = "Configure";
+
+  if (!conform) {
+    valueLine = "Unsupported";
+  } else if (!binding) {
+    header = [title ?? "Synapsed"];
   } else {
-    const resolved = resolveBinding(snapshot, settings.binding);
-    const service =
-      connection === "incompatible"
-        ? "Incompatible"
-        : connection === "connecting"
-          ? "Connecting"
-          : connection === "disconnected"
-            ? "Service Offline"
-            : undefined;
+    resolved = resolveBinding(snapshot, binding);
+    const service = serviceState(connection);
     if (!resolved) {
-      current = service ?? "Missing";
-      state = service ?? "Missing";
+      header = title ? [title] : [binding.deviceId, binding.characteristicId];
+      valueLine = service ?? "Missing";
     } else {
       const { device, characteristic } = resolved;
-      label = characteristic.label;
-      current = readingText(characteristic);
-      state = service ?? unavailableText(device, characteristic);
-      if (state && characteristic.spec.kind !== "action" && characteristic.value !== null)
-        current = `${current} (stale)`;
-      const command = settings.keyCommand ?? defaultCommand(characteristic);
-      if (command && !isCommandApplicable(characteristic, command)) state = "Unsupported";
-      if (settings.pressBinding || settings.pressCommand) {
-        const secondary = resolveBinding(snapshot, settings.pressBinding ?? settings.binding);
-        if (!secondary) state ??= "Missing press binding";
-        else {
-          const pressCommand = settings.pressCommand ?? defaultCommand(secondary.characteristic);
-          if (pressCommand && !isCommandApplicable(secondary.characteristic, pressCommand))
-            state ??= "Unsupported press";
-          if (secondary.characteristic.spec.kind === "boolean") {
-            const stale =
-              connection !== "connected" ||
-              secondary.device.status !== "online" ||
-              secondary.characteristic.status !== "ok";
-            label += ` · ${secondary.characteristic.label}: ${readingText(secondary.characteristic)}${stale ? " (stale)" : ""}`;
-          }
-        }
+      header = title ? [title] : [device.label, characteristic.label];
+      const unavailable = service ?? unavailableText(device, characteristic);
+      if (!eligible(characteristic)) {
+        valueLine = "Unsupported";
+      } else if (commandRequired && (!command || !isCommandApplicable(characteristic, command))) {
+        valueLine = "Choose action";
+      } else if (unavailable) {
+        valueLine =
+          characteristic.value !== null && characteristic.spec.kind !== "action"
+            ? `${readingText(characteristic)} (stale)`
+            : unavailable;
+      } else if (characteristic.spec.kind !== "action") {
+        valueLine = readingText(characteristic);
+      } else {
+        valueLine = undefined;
       }
+
       if (characteristic.spec.kind === "number") {
         const spec = characteristic.spec;
         if (
@@ -123,19 +144,71 @@ export function renderDisplay(
           percent = (100 * index) / (options.length - 1);
         }
       }
-      if (pending) state = state ? `${state} · Pending` : "Pending";
     }
   }
-  const heading = state ? `${label} · ${state}` : label;
+
+  if (pending) valueLine = valueLine ? `${valueLine} · Pending` : "Pending";
+  return { header, valueLine, resolved, minimum, maximum, percent, bounded };
+}
+
+export function renderKey(
+  settings: KeySettings,
+  snapshot: Snapshot | undefined,
+  connection: ClientStatus,
+  pending: boolean,
+): string {
+  const parts = renderParts(
+    settings,
+    keySettingsConform(settings),
+    keyBinding(settings),
+    snapshot,
+    connection,
+    pending,
+    keyEligible,
+    settings.command,
+    true,
+  );
+  const command = settings.command;
+  const resolved = parts.resolved;
+  const characteristic = resolved?.characteristic;
+  let valueLine = parts.valueLine;
+  if (
+    command?.op === "set" &&
+    typeof command.value === "number" &&
+    characteristic?.spec.kind === "number" &&
+    resolved &&
+    isCommandApplicable(characteristic, command)
+  ) {
+    const target = `${command.value}${characteristic.spec.unit ?? ""}`;
+    const unavailable = serviceState(connection) ?? unavailableText(resolved.device, characteristic);
+    const pendingSuffix = pending ? " · Pending" : "";
+    valueLine = unavailable
+      ? `${(parts.valueLine ?? unavailable).replace(/ · Pending$/, "")} · to ${target}${pendingSuffix}`
+      : `to ${target}${pendingSuffix}`;
+  }
+  return [...parts.header, valueLine].filter(Boolean).join("\n");
+}
+
+export function renderDial(
+  settings: DialSettings,
+  snapshot: Snapshot | undefined,
+  connection: ClientStatus,
+  pending: boolean,
+): DisplayFeedback {
+  const conform = dialSettingsConform(settings);
+  const parts = renderParts(settings, conform, rotateBinding(settings), snapshot, connection, pending, rotateEligible);
+  let title = parts.header.join(" · ");
+  const press = conform ? resolveBinding(snapshot, pressBinding(settings)) : undefined;
+  if (press?.characteristic.spec.kind === "boolean") {
+    const stale = serviceState(connection) ?? unavailableText(press.device, press.characteristic);
+    title += ` · ${press.characteristic.label}: ${readingText(press.characteristic)}${stale ? " (stale)" : ""}`;
+  }
   const feedback = {
-    title: heading,
-    current,
-    minimum: { value: minimum, enabled: bounded },
-    maximum: { value: maximum, enabled: bounded },
-    bar: { value: percent, enabled: bounded },
+    title,
+    current: parts.valueLine ?? "",
+    minimum: { value: parts.minimum, enabled: parts.bounded },
+    maximum: { value: parts.maximum, enabled: parts.bounded },
+    bar: { value: parts.percent, enabled: parts.bounded },
   } satisfies FeedbackPayload & DisplayFeedback;
-  return {
-    title: `${heading}\n${current}`,
-    feedback,
-  };
+  return feedback;
 }

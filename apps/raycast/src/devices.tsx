@@ -65,7 +65,15 @@ export default function Devices() {
                 }
               />
             }
-            actions={<ActionPanel>{preferences}</ActionPanel>}
+            actions={
+              <ActionPanel>
+                <Action
+                  title={state.restartingDrivers.has(driver.id) ? "Restarting Driver" : "Restart Driver"}
+                  onAction={() => void session.restartDriver(driver.id)}
+                />
+                {preferences}
+              </ActionPanel>
+            }
           />
         ))}
       </List.Section>

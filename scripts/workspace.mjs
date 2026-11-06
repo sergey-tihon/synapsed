@@ -116,7 +116,7 @@ async function daemonArchive(version) {
       await copyFile(join(binaries, name), destination);
       await chmod(destination, 0o755);
     }
-    for (const name of ["generic-ddc", "benq-rd280u"])
+    for (const name of ["generic-ddc", "benq-rd280u", "ikea-idasen"])
       await cp(join(root, "drivers", name), join(staging, "drivers", name), { recursive: true });
     for (const name of ["deploy", "docs"]) await cp(join(root, name), join(staging, name), { recursive: true });
     if (!macos) {
@@ -235,7 +235,7 @@ try {
       await npm("@synapsed/client", "test");
       await npm("@synapsed/web", "test");
       await npm("@synapsed/streamdeck", "test");
-      await run(process.execPath, ["--test", "apps/omarchy/tests/model.test.mjs"]);
+      await run("npm", ["run", "test", "--prefix", "apps/raycast"]);
       break;
     case "validate":
       requireMacos();

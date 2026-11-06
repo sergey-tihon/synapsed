@@ -24,21 +24,13 @@
   ],
   "Actions": [
     {
-      "Name": "Characteristic",
-      "UUID": "com.sergey-tihon.synapsed.characteristic",
+      "Name": "Key",
+      "UUID": "com.sergey-tihon.synapsed.key",
       "Icon": "imgs/actions/characteristic/icon",
-      "Tooltip": "Bind a local characteristic. Rotate to step; press runs the configured command or secondary binding.",
+      "Tooltip": "Run a command on a device characteristic.",
       "PropertyInspectorPath": "bin/inspector/index.html",
-      "Controllers": ["Keypad", "Encoder"],
+      "Controllers": ["Keypad"],
       "UserTitleEnabled": false,
-      "Encoder": {
-        "Icon": "imgs/actions/characteristic/key",
-        "layout": "layouts/metric.json",
-        "TriggerDescription": {
-          "Rotate": "Step the bound number or enum",
-          "Push": "Run the primary or configured press command"
-        }
-      },
       "States": [
         {
           "Image": "imgs/actions/characteristic/key",
@@ -46,6 +38,24 @@
           "TitleAlignment": "middle"
         }
       ]
+    },
+    {
+      "Name": "Dial",
+      "UUID": "com.sergey-tihon.synapsed.dial",
+      "Icon": "imgs/actions/characteristic/icon",
+      "Tooltip": "Rotate to step a characteristic; press to toggle or run an action on the same device.",
+      "PropertyInspectorPath": "bin/inspector/index.html",
+      "Controllers": ["Encoder"],
+      "UserTitleEnabled": false,
+      "Encoder": {
+        "Icon": "imgs/actions/characteristic/key",
+        "layout": "layouts/metric.json",
+        "TriggerDescription": {
+          "Rotate": "Step the selected characteristic",
+          "Push": "Run the configured press action"
+        }
+      },
+      "States": [{ "Image": "imgs/actions/characteristic/key" }]
     }
   ]
 }

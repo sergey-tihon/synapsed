@@ -111,8 +111,12 @@ pub fn parse_managed_objects(objects: &ManagedObjects, sysfs_root: &Path) -> Vec
         if !adapter_keys.contains(&adapter_key) {
             continue;
         }
+        let endpoint_identity = key
+            .strip_prefix("/org/bluez/")
+            .map(crate::bluetooth_endpoint_identity);
         records.push(RawRecord::BluetoothDevice {
             key,
+            endpoint_identity,
             adapter_key,
             name: string_property(properties, "Alias"),
             icon: string_property(properties, "Icon"),
@@ -297,6 +301,19 @@ mod tests {
                 true,
                 false
             )
+        );
+        let endpoint_identity = records.iter().find_map(|record| match record {
+            RawRecord::BluetoothDevice {
+                endpoint_identity, ..
+            } => endpoint_identity.as_deref(),
+            _ => None,
+        });
+        assert_eq!(
+            endpoint_identity,
+            Some(crate::bluetooth_endpoint_identity(
+                "hci0/dev_01_23_45_67_89_AB"
+            ))
+            .as_deref()
         );
         let response = crate::topology::build(
             &records,

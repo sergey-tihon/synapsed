@@ -8,6 +8,8 @@ export default function Overview() {
   const [inventory, setInventory] = createSignal<InventoryResponse | null>(null);
   const [inventoryError, setInventoryError] = createSignal("");
   const [now, setNow] = createSignal(Date.now());
+  const [restarting, setRestarting] = createSignal<ReadonlySet<string>>(new Set());
+  const [restartFeedback, setRestartFeedback] = createSignal<{ message: string; error: boolean } | null>(null);
   const snapshot = () => session.snapshot();
   const problems = createMemo(() => {
     const current = snapshot();
@@ -28,6 +30,30 @@ export default function Overview() {
     if (!current || (instanceId && current.instanceId !== instanceId)) return null;
     return current.nodes.filter((node) => node.kind !== "host").length;
   });
+  async function restartDriver(driverId: string): Promise<void> {
+    if (restarting().has(driverId)) return;
+    const pending = new Set(restarting());
+    pending.add(driverId);
+    setRestarting(pending);
+    setRestartFeedback(null);
+    try {
+      const observed = await session.restartDriver(driverId);
+      const status = observed.drivers.find((driver) => driver.id === driverId);
+      setRestartFeedback({
+        message: status ? `${driverId} restarted; status ${status.state}.` : `${driverId} restart returned no status.`,
+        error: status?.state !== "online",
+      });
+    } catch (error) {
+      setRestartFeedback({
+        message: error instanceof Error ? error.message : "Driver restart failed.",
+        error: true,
+      });
+    } finally {
+      const next = new Set(restarting());
+      next.delete(driverId);
+      setRestarting(next);
+    }
+  }
 
   let inventoryController: AbortController | undefined;
   let requestedInstance = "";
@@ -158,6 +184,14 @@ export default function Overview() {
                         <strong>{driver.id}</strong>
                         <span class="muted">{driver.version}</span>
                       </div>
+                      <button
+                        type="button"
+                        class="refresh-button"
+                        disabled={session.connection() !== "connected" || restarting().has(driver.id)}
+                        onClick={() => void restartDriver(driver.id)}
+                      >
+                        {restarting().has(driver.id) ? "Restarting…" : "Restart"}
+                      </button>
                       <span class="badge" data-state={driver.state}>
                         {driver.state}
                       </span>
@@ -171,6 +205,11 @@ export default function Overview() {
                 )}
               </For>
             </ul>
+            {restartFeedback() ? (
+              <p class={restartFeedback()!.error ? "error" : "muted"} role="status">
+                {restartFeedback()!.message}
+              </p>
+            ) : null}
           </Show>
         </Show>
       </section>

@@ -32,6 +32,11 @@ pub struct Completion {
     pub binding: CommandBinding,
     pub error: Option<String>,
 }
+pub struct DriverRestartCompletion {
+    pub token: u64,
+    pub driver: String,
+    pub error: Option<String>,
+}
 #[derive(Default)]
 struct CoalescingWake {
     pending: bool,
@@ -63,6 +68,7 @@ pub struct View {
     pub connection: Connection,
     pub error: Option<String>,
     pub completions: Vec<Completion>,
+    pub driver_restarts: Vec<DriverRestartCompletion>,
     wake: CoalescingWake,
 }
 impl Default for View {
@@ -72,6 +78,7 @@ impl Default for View {
             connection: Connection::Connecting,
             error: None,
             completions: Vec::with_capacity(MAX_PENDING),
+            driver_restarts: Vec::with_capacity(MAX_PENDING),
             wake: CoalescingWake::default(),
         }
     }
@@ -111,6 +118,7 @@ impl Mailbox {
             connection: view.connection,
             error: view.error.clone(),
             completions: std::mem::take(&mut view.completions),
+            driver_restarts: std::mem::take(&mut view.driver_restarts),
             wake: CoalescingWake::default(),
         }
     }
@@ -149,11 +157,35 @@ impl Mailbox {
             });
         });
     }
+    fn complete_driver_restart(
+        &self,
+        client: &Client,
+        token: u64,
+        driver: String,
+        result: Result<Arc<Snapshot>, ClientError>,
+    ) {
+        self.update(|view| {
+            view.snapshot = client.cached_snapshot();
+            if let Err(error) = &result {
+                if error.is_terminal() {
+                    view.connection = Connection::Incompatible;
+                    view.error = Some(error.to_string());
+                } else if client.is_stale() {
+                    view.connection = Connection::Offline;
+                }
+            }
+            view.driver_restarts.push(DriverRestartCompletion {
+                token,
+                driver,
+                error: result.err().map(|error| error.to_string()),
+            });
+        });
+    }
 }
 
-pub struct Request {
-    pub token: u64,
-    pub binding: CommandBinding,
+pub enum Request {
+    Command { token: u64, binding: CommandBinding },
+    RestartDriver { token: u64, driver: String },
 }
 pub struct Worker {
     pub endpoint: Option<Url>,
@@ -271,17 +303,40 @@ async fn run(
             _ = cancelled(&mut cancel) => break,
             request = requests.recv() => match request { Some(request) => request, None => break },
         };
-        let result = match client.cached_snapshot() {
-            Some(snapshot) if !client.is_stale() && request.binding.valid_for(&snapshot) => {
-                tokio::select! {
-                    biased;
-                    _ = cancelled(&mut cancel) => break,
-                    result = client.execute(request.binding.device_id(), request.binding.characteristic_id(), request.binding.command.clone()) => result,
-                }
+        match request {
+            Request::Command { token, binding } => {
+                let result = match client.cached_snapshot() {
+                    Some(snapshot) if !client.is_stale() && binding.valid_for(&snapshot) => {
+                        tokio::select! {
+                            biased;
+                            _ = cancelled(&mut cancel) => break,
+                            result = client.execute(binding.device_id(), binding.characteristic_id(), binding.command.clone()) => result,
+                        }
+                    }
+                    _ => Err(ClientError::Stale),
+                };
+                mailbox.complete(&client, token, binding, result);
             }
-            _ => Err(ClientError::Stale),
-        };
-        mailbox.complete(&client, request.token, request.binding, result);
+            Request::RestartDriver { token, driver } => {
+                let result = match client.cached_snapshot() {
+                    Some(snapshot)
+                        if !client.is_stale()
+                            && snapshot
+                                .drivers
+                                .iter()
+                                .any(|installed| installed.id == driver) =>
+                    {
+                        tokio::select! {
+                            biased;
+                            _ = cancelled(&mut cancel) => break,
+                            result = client.restart_driver(&driver) => result,
+                        }
+                    }
+                    _ => Err(ClientError::Stale),
+                };
+                mailbox.complete_driver_restart(&client, token, driver, result);
+            }
+        }
     }
     // Shared close cancels requests and socket readers before the runtime is dropped.
     client.close();

@@ -1,6 +1,6 @@
 import streamDeck from "@elgato/streamdeck";
 import { createClient, type SynapsedClient } from "@synapsed/client";
-import { CharacteristicAction } from "./actions.js";
+import { DialAction, KeyAction } from "./actions.js";
 import { loadEndpoint } from "./config.js";
 import { Contexts } from "./contexts.js";
 
@@ -13,7 +13,8 @@ try {
   streamDeck.logger.error(configurationError);
 }
 const contexts = new Contexts(client, configurationError);
-streamDeck.actions.registerAction(new CharacteristicAction(contexts));
+streamDeck.actions.registerAction(new KeyAction(contexts));
+streamDeck.actions.registerAction(new DialAction(contexts));
 for (const signal of ["SIGINT", "SIGTERM"] as const) {
   process.once(signal, () => {
     contexts.close();

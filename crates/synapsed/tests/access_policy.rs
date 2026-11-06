@@ -313,12 +313,24 @@ async fn commands_are_bounded_and_unknown_fields_are_sanitized() {
             .status(),
         422
     );
-    assert_eq!(
+    let response = fixture
+        .execute("brightness", serde_json::json!({"op":"toggle"}))
+        .await;
+    assert_eq!(response.status(), 422);
+    let error: ErrorResponse = response.json().await.unwrap();
+    let expected = format!(
+        "Command rejected: monitor/brightness: {}",
+        serde_json::to_value(error.error.code)
+            .unwrap()
+            .as_str()
+            .unwrap()
+    );
+    assert!(
         fixture
-            .execute("brightness", serde_json::json!({"op":"toggle"}))
-            .await
-            .status(),
-        422
+            .logs
+            .recent()
+            .iter()
+            .any(|entry| { entry.target == "synapsed::api" && entry.message == expected })
     );
     assert_eq!(
         fixture

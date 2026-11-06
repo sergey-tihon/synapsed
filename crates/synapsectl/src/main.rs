@@ -274,7 +274,7 @@ async fn mutate(
         .validate_command(&command)
         .map_err(ClientError::Api)?;
     let snapshot = client.execute(device, characteristic, command).await?;
-    output.snapshot(snapshot.as_ref())?;
+    output.command_result(device, characteristic, snapshot.as_ref())?;
     Ok(())
 }
 

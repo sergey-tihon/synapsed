@@ -7,8 +7,8 @@ pub mod operation;
 pub mod state;
 /// Native operation authorization, lifecycle, and transport outcome types.
 pub use operation::{
-    DeviceGrant, EndpointGates, EndpointToken, NativeWork, OperationContext, OperationState,
-    TransportOutcome,
+    DeviceGrant, EndpointDescriptor, EndpointGates, EndpointToken, GrantLiveness, NativeWork,
+    OperationContext, OperationState, TransportOutcome, allocate_endpoint_id,
 };
 /// Snapshot and cached JSON encoding captured by one publication.
 pub use state::PublishedSnapshot;

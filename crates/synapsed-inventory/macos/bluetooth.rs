@@ -40,9 +40,12 @@ pub fn collect() -> SourceCollection {
         .as_ref()
         .and_then(|controller| unsafe { controller.nameAsString() })
         .map(|name| name.to_string());
-    let powered = controller
-        .as_ref()
-        .is_some_and(|controller| unsafe { controller.powerState() } == BluetoothHCIPowerState::ON);
+    let powered = controller.as_ref().is_some_and(|controller| {
+        // The runtime encodes this selector as signed `i`; the generated wrapper
+        // declares unsigned `I` and panics on that mismatch. Power states are 0/1.
+        let state: i32 = unsafe { objc2::msg_send![controller, powerState] };
+        state == BluetoothHCIPowerState::ON.0 as i32
+    });
     let mut records = vec![RawRecord::BluetoothAdapter {
         key: ADAPTER_KEY.to_owned(),
         controller_key: None,
@@ -100,6 +103,7 @@ fn paired_device_records(mut devices: Vec<PairedDevice>) -> Vec<RawRecord> {
             *ordinal += 1;
             RawRecord::BluetoothDevice {
                 key,
+                endpoint_identity: None,
                 adapter_key: ADAPTER_KEY.to_owned(),
                 name: Some(device.name),
                 icon: Some(device.class),

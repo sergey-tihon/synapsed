@@ -28,8 +28,8 @@ use std::{
     time::{Duration, Instant},
 };
 use synapsed_api::{
-    ApiError, CharacteristicChange, CharacteristicCommand, DeviceResponse, DeviceStatus, ErrorCode,
-    LogLevel, LogsResponse, ServerEvent, Snapshot,
+    ApiError, CharacteristicChange, CharacteristicCommand, CharacteristicValue, DeviceResponse,
+    DeviceStatus, ErrorCode, LogLevel, LogsResponse, ServerEvent, Snapshot,
 };
 use synapsed_core::{PublishedSnapshot, StateStore};
 use synapsed_plugins::PluginHost;
@@ -105,6 +105,10 @@ impl Application {
             .route(
                 "/api/v1/devices/{device_id}/characteristics/{characteristic_id}",
                 post(execute).options(preflight),
+            )
+            .route(
+                "/api/v1/drivers/{driver_id}/restart",
+                post(restart_driver).options(preflight),
             )
             .route("/api/v1/logs", get(logs).options(preflight))
             .route("/api/v1/events", get(events).options(preflight))
@@ -434,9 +438,21 @@ async fn execute(
     let current = application.store().snapshot();
     let (device, characteristic) = match lookup(&current, &device_id, &characteristic_id) {
         Ok(found) => found,
-        Err(error) => return error_response(error),
+        Err(error) => {
+            application.logs().record(
+                LogLevel::Warn,
+                "synapsed::api",
+                "Command rejected: unknown device or characteristic.",
+            );
+            return error_response(error);
+        }
     };
+    let target = format!("{device_id}/{characteristic_id}");
     if device.status != DeviceStatus::Online {
+        application.logs().command(
+            LogLevel::Warn,
+            &format!("Command rejected: {target}: device_unavailable"),
+        );
         return error_response(ApiError::new(
             ErrorCode::DeviceUnavailable,
             "Device is unavailable.",
@@ -444,15 +460,38 @@ async fn execute(
     }
     let bytes = match require_json_body(request).await {
         Ok(bytes) => bytes,
-        Err(error) => return error_response(error),
+        Err(error) => {
+            application.logs().command(
+                LogLevel::Warn,
+                &format!(
+                    "Command rejected: {target}: {}",
+                    error_code_name(error.code)
+                ),
+            );
+            return error_response(error);
+        }
     };
     let command = match CharacteristicCommand::from_json(&bytes).and_then(|command| {
         characteristic.validate_command(&command)?;
         Ok(command)
     }) {
         Ok(command) => command,
-        Err(error) => return error_response(error),
+        Err(error) => {
+            application.logs().command(
+                LogLevel::Warn,
+                &format!(
+                    "Command rejected: {target}: {}",
+                    error_code_name(error.code)
+                ),
+            );
+            return error_response(error);
+        }
     };
+    let description = describe_command(&command);
+    application.logs().command(
+        LogLevel::Info,
+        &format!("Command received: {target} {description}"),
+    );
     match application
         .inner
         .host
@@ -461,28 +500,88 @@ async fn execute(
     {
         // Dispatch confirmed the command. Return the newest authoritative publication
         // using its cached encoding; concurrent observations must not regress clients.
-        Ok(_) => snapshot(State(application.clone())).await,
+        Ok(_) => {
+            application.logs().command(
+                LogLevel::Info,
+                &format!("Command applied: {target} {description}"),
+            );
+            snapshot(State(application.clone())).await
+        }
         Err(error) => {
-            application.logs().record(
+            application.logs().command(
                 LogLevel::Warn,
-                "synapsed",
-                command_error_message(error.code),
+                &format!(
+                    "Command failed: {target} {description}: {} ({})",
+                    command_error_reason(error.code),
+                    error_code_name(error.code)
+                ),
             );
             error_response(error)
         }
     }
 }
-fn command_error_message(code: ErrorCode) -> &'static str {
-    match code {
-        ErrorCode::Timeout => "Command failed: timeout.",
-        ErrorCode::DdcError => "Command failed: DDC transport error.",
-        ErrorCode::PermissionDenied => "Command failed: transport permission denied.",
-        ErrorCode::PluginError => "Command failed: plugin error.",
-        ErrorCode::Busy => "Command failed: driver is busy.",
-        ErrorCode::DriverConflict | ErrorCode::AmbiguousDevice => {
-            "Command failed: conflicting device ownership."
+async fn restart_driver(
+    State(application): State<Application>,
+    Path(driver_id): Path<String>,
+) -> Response {
+    application.logs().command(
+        LogLevel::Info,
+        &format!("Driver restart received: {driver_id}"),
+    );
+    match application.inner.host.restart_driver(&driver_id).await {
+        Ok(_) => {
+            application.logs().command(
+                LogLevel::Info,
+                &format!("Driver restart completed: {driver_id}"),
+            );
+            snapshot(State(application)).await
         }
-        _ => "Command was rejected by its current driver.",
+        Err(error) => {
+            application.logs().command(
+                LogLevel::Warn,
+                &format!(
+                    "Driver restart failed: {driver_id}: {} ({})",
+                    command_error_reason(error.code),
+                    error_code_name(error.code)
+                ),
+            );
+            error_response(error)
+        }
+    }
+}
+fn describe_command(command: &CharacteristicCommand) -> String {
+    match command {
+        CharacteristicCommand::Set { value } => match value {
+            CharacteristicValue::Number(number) => format!("set {number}"),
+            CharacteristicValue::Boolean(value) => format!("set {value}"),
+            CharacteristicValue::String(value) => {
+                format!(
+                    "set {}",
+                    serde_json::to_string(value).expect("strings serialize")
+                )
+            }
+        },
+        CharacteristicCommand::Step { steps } => format!("step {steps:+}"),
+        CharacteristicCommand::Toggle {} => "toggle".to_owned(),
+        CharacteristicCommand::Invoke {} => "invoke".to_owned(),
+    }
+}
+fn error_code_name(code: ErrorCode) -> String {
+    serde_json::to_value(code)
+        .ok()
+        .and_then(|value| value.as_str().map(str::to_owned))
+        .unwrap_or_else(|| "unknown".to_owned())
+}
+fn command_error_reason(code: ErrorCode) -> &'static str {
+    match code {
+        ErrorCode::Timeout => "timeout",
+        ErrorCode::DdcError => "DDC transport error",
+        ErrorCode::BluetoothError => "Bluetooth transport error",
+        ErrorCode::PermissionDenied => "transport permission denied",
+        ErrorCode::PluginError => "plugin error",
+        ErrorCode::Busy => "driver is busy",
+        ErrorCode::DriverConflict | ErrorCode::AmbiguousDevice => "conflicting device ownership",
+        _ => "rejected by its current driver",
     }
 }
 async fn logs(State(application): State<Application>) -> Response {

@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, HashMap},
     path::{Path, PathBuf},
     sync::Arc,
     time::{Duration, Instant},
@@ -8,7 +8,8 @@ use synapsed_api::{InventoryResponse, InventorySource, InventorySourceKind, Inve
 use synapsed_core::{DriverError, ErrorCode, StateStore};
 use synapsed_ddc::{CachedEndpointScan, LazyDdc, Placement};
 use synapsed_inventory::{
-    Bus, DeviceBinding, DriverCatalogEntry, RawRecord, SourceCollection, build_with_sources,
+    BoundEndpoint, Bus, DeviceBinding, DriverCatalogEntry, RawRecord, SourceCollection,
+    build_with_sources,
 };
 use synapsed_plugins::Bindings;
 use tokio::{
@@ -112,27 +113,7 @@ async fn collect_uncached(sources: &Sources, deadline: TokioInstant) -> Inventor
     ];
 
     let snapshot = sources.store.snapshot();
-    let bindings: BTreeMap<String, DeviceBinding> = sources
-        .bindings
-        .borrow()
-        .iter()
-        .map(|(device_id, binding)| {
-            (
-                device_id.clone(),
-                DeviceBinding {
-                    driver: binding.driver.clone(),
-                    endpoints: binding
-                        .endpoints
-                        .iter()
-                        .map(|token| {
-                            let key = endpoint_key(token);
-                            ddc_aliases.get(&key).cloned().unwrap_or(key)
-                        })
-                        .collect(),
-                },
-            )
-        })
-        .collect();
+    let bindings = device_bindings(&sources.bindings.borrow(), &ddc_aliases);
     let mut response = build_with_sources(
         &records,
         &bindings,
@@ -146,6 +127,44 @@ async fn collect_uncached(sources: &Sources, deadline: TokioInstant) -> Inventor
 
 fn endpoint_key(token: &synapsed_core::EndpointToken) -> String {
     format!("{}-{}", token.id, token.generation)
+}
+
+fn device_bindings(
+    bindings: &Bindings,
+    ddc_aliases: &BTreeMap<String, String>,
+) -> BTreeMap<String, DeviceBinding> {
+    bindings
+        .iter()
+        .map(|(device_id, binding)| {
+            let endpoints = binding
+                .endpoints
+                .iter()
+                .filter_map(|endpoint| match endpoint.capability.as_str() {
+                    "ddc" => ddc_aliases
+                        .get(&endpoint_key(&endpoint.token))
+                        .cloned()
+                        .map(BoundEndpoint::Display),
+                    "bluetooth" => {
+                        endpoint
+                            .identity
+                            .clone()
+                            .map(|identity| BoundEndpoint::Bluetooth {
+                                identity,
+                                name: endpoint.product_name.clone(),
+                            })
+                    }
+                    _ => None,
+                })
+                .collect();
+            (
+                device_id.clone(),
+                DeviceBinding {
+                    driver: binding.driver.clone(),
+                    endpoints,
+                },
+            )
+        })
+        .collect()
 }
 
 async fn collect_ddc(ddc: LazyDdc) -> DdcCollection {
@@ -183,8 +202,13 @@ fn collect_cached_ddc(scan: CachedEndpointScan) -> DdcCollection {
     let mut records = Vec::new();
     let mut aliases = BTreeMap::new();
     let mut controllers = BTreeSet::new();
+    let mut placed_by_identity = HashMap::<String, BTreeSet<String>>::new();
+    let mut unplaced = Vec::new();
     for (endpoint, placement) in scan.endpoints {
-        let Some(placement) = placement else { continue };
+        let Some(placement) = placement else {
+            unplaced.push(endpoint);
+            continue;
+        };
         if controllers.insert(placement.controller_key.clone()) {
             records.push(RawRecord::Controller {
                 key: placement.controller_key.clone(),
@@ -194,9 +218,49 @@ fn collect_cached_ddc(scan: CachedEndpointScan) -> DdcCollection {
         }
         let token_key = endpoint_key(&endpoint.token);
         let display_key = stable_display_key(&endpoint, &placement);
+        if let Some(identity) = endpoint
+            .identity
+            .as_ref()
+            .filter(|identity| !identity.is_empty())
+        {
+            placed_by_identity
+                .entry(identity.clone())
+                .or_default()
+                .insert(display_key.clone());
+        }
         aliases.insert(token_key, display_key.clone());
-        records.push(display_record(endpoint, placement, display_key));
+        records.push(display_record(endpoint, Some(placement), display_key));
     }
+
+    let mut unplaced_by_identity = BTreeMap::<String, String>::new();
+    for endpoint in unplaced {
+        let token_key = endpoint_key(&endpoint.token);
+        let identity = endpoint
+            .identity
+            .as_deref()
+            .filter(|identity| !identity.is_empty());
+        let (display_key, create_record) = if let Some(identity) = identity {
+            if let Some(placed) = placed_by_identity.get(identity) {
+                if placed.len() != 1 {
+                    continue;
+                }
+                (placed.iter().next().unwrap().clone(), false)
+            } else if let Some(display_key) = unplaced_by_identity.get(identity) {
+                (display_key.clone(), false)
+            } else {
+                let display_key = stable_unplaced_display_key(&endpoint);
+                unplaced_by_identity.insert(identity.to_owned(), display_key.clone());
+                (display_key, true)
+            }
+        } else {
+            (stable_unplaced_display_key(&endpoint), true)
+        };
+        if create_record {
+            records.push(display_record(endpoint, None, display_key.clone()));
+        }
+        aliases.insert(token_key, display_key);
+    }
+
     DdcCollection {
         source: SourceCollection {
             records,
@@ -226,7 +290,7 @@ fn ddc_status(error: Option<&DriverError>) -> InventorySource {
 }
 
 fn stable_display_key(
-    endpoint: &synapsed_ddc::EndpointDescriptor,
+    endpoint: &synapsed_core::EndpointDescriptor,
     placement: &Placement,
 ) -> String {
     format!(
@@ -239,15 +303,32 @@ fn stable_display_key(
     )
 }
 
+fn stable_unplaced_display_key(endpoint: &synapsed_core::EndpointDescriptor) -> String {
+    match endpoint
+        .identity
+        .as_deref()
+        .filter(|identity| !identity.is_empty())
+    {
+        Some(identity) => format!("unplaced|{identity}"),
+        None => format!(
+            "unplaced|endpoint-{}-{}",
+            endpoint.token.id, endpoint.token.generation
+        ),
+    }
+}
+
 fn display_record(
-    endpoint: synapsed_ddc::EndpointDescriptor,
-    placement: Placement,
+    endpoint: synapsed_core::EndpointDescriptor,
+    placement: Option<Placement>,
     stable_key: String,
 ) -> RawRecord {
+    let (connector, controller_key) = placement.map_or((None, None), |placement| {
+        (Some(placement.connector), Some(placement.controller_key))
+    });
     RawRecord::Display {
         endpoint_token: stable_key,
-        connector: placement.connector,
-        controller_key: placement.controller_key,
+        connector,
+        controller_key,
         manufacturer: endpoint.manufacturer,
         product_name: endpoint.product_name,
     }
@@ -411,5 +492,92 @@ mod tests {
             collected.source.status.message.as_deref(),
             Some("An eligible adapter was denied.")
         );
+    }
+
+    #[test]
+    fn unplaced_ddc_endpoints_are_counted_and_bind_to_their_driver() {
+        let endpoint = synapsed_core::EndpointDescriptor {
+            token: synapsed_core::EndpointToken {
+                id: 7,
+                generation: 1,
+            },
+            capability: "ddc".to_owned(),
+            manufacturer: Some("BNQ".to_owned()),
+            product: Some(0x1234),
+            product_name: Some("BenQ RD280U".to_owned()),
+            identity: Some("opaque-edid-identity".to_owned()),
+        };
+        let duplicate = synapsed_core::EndpointDescriptor {
+            token: synapsed_core::EndpointToken {
+                id: 8,
+                generation: 1,
+            },
+            ..endpoint.clone()
+        };
+        let identityless = synapsed_core::EndpointDescriptor {
+            token: synapsed_core::EndpointToken {
+                id: 9,
+                generation: 1,
+            },
+            identity: None,
+            ..endpoint.clone()
+        };
+        let collected = collect_cached_ddc(CachedEndpointScan {
+            endpoints: vec![
+                (endpoint.clone(), None),
+                (duplicate.clone(), None),
+                (identityless, None),
+            ],
+            error: None,
+        });
+        assert_eq!(collected.source.status.state, InventorySourceState::Ok);
+        assert_eq!(collected.aliases.len(), 3);
+        assert_eq!(
+            collected.aliases[&endpoint_key(&endpoint.token)],
+            collected.aliases[&endpoint_key(&duplicate.token)]
+        );
+
+        let published = BTreeMap::from([(
+            "monitor".to_owned(),
+            synapsed_plugins::Binding {
+                driver: "benq-rd280u".to_owned(),
+                endpoints: vec![endpoint],
+            },
+        )]);
+        let bindings = device_bindings(&published, &collected.aliases);
+        let catalog = [DriverCatalogEntry {
+            id: "benq-rd280u".to_owned(),
+            version: "0.1.0".to_owned(),
+            generic: false,
+            inventory_matches: Vec::new(),
+        }];
+        let response = synapsed_inventory::build(
+            &collected.source.records,
+            &bindings,
+            &catalog,
+            b"inventory-test-salt",
+        );
+        let displays: Vec<_> = response
+            .nodes
+            .iter()
+            .filter(|node| node.kind == synapsed_api::InventoryNodeKind::Display)
+            .collect();
+        assert_eq!(displays.len(), 2);
+        let linked = displays.iter().find(|node| node.driver.is_some()).unwrap();
+        assert!(linked.label.contains("BenQ RD280U"));
+        assert_eq!(
+            linked.detail.as_deref(),
+            Some("Display location unavailable")
+        );
+        assert_eq!(
+            linked.parent_id.as_deref(),
+            Some(response.nodes[0].id.as_str())
+        );
+        let badge = linked.driver.as_ref().unwrap();
+        assert_eq!(badge.id, "benq-rd280u");
+        assert_eq!(badge.device_id.as_deref(), Some("monitor"));
+        assert_eq!(badge.class, synapsed_api::InventoryDriverClass::Specialized);
+        assert!(displays.iter().any(|node| node.driver.is_none()));
+        assert!(response.validate().is_ok());
     }
 }

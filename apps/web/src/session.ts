@@ -75,6 +75,7 @@ export interface SynapsedSession {
   pending(): ReadonlySet<string>;
   results(): ReadonlyMap<string, CommandResult>;
   execute(deviceId: string, characteristicId: string, command: CharacteristicCommand): Promise<boolean>;
+  restartDriver(driverId: string): Promise<Snapshot>;
   getInventory(options?: { signal?: AbortSignal }): Promise<InventoryResponse>;
 }
 
@@ -175,6 +176,13 @@ export function createSynapsedSession(): SynapsedSession {
       void fetchStatus(next.node.instanceId);
   }
 
+  async function restartDriver(driverId: string): Promise<Snapshot> {
+    const currentClient = client;
+    if (!alive || !currentClient || connection() !== "connected") {
+      throw new Error("Connect to the Synapsed service before restarting a driver.");
+    }
+    return currentClient.restartDriver(driverId);
+  }
   async function execute(deviceId: string, characteristicId: string, command: CharacteristicCommand): Promise<boolean> {
     const currentClient = client;
     const currentSnapshot = state.snapshot;
@@ -296,6 +304,7 @@ export function createSynapsedSession(): SynapsedSession {
     pending,
     results,
     execute,
+    restartDriver,
     getInventory(options) {
       if (!alive || !client) return Promise.reject(new Error("The Synapsed service connection is not ready."));
       return client.getInventory(options);

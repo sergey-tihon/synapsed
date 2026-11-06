@@ -1,10 +1,11 @@
 //! Deterministic topology construction and public-record sanitization.
 
 use crate::model::{
-    Bus, DeviceBinding, DriverCatalogEntry, InventoryMatch, InventoryRole, RawRecord,
+    BoundEndpoint, Bus, DeviceBinding, DriverCatalogEntry, InventoryMatch, InventoryRole,
+    RawRecord, bluetooth_display_name,
 };
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::time::{SystemTime, UNIX_EPOCH};
 use synapsed_api::MAX_INVENTORY_NODES;
 use synapsed_api::{
@@ -204,7 +205,10 @@ impl NodeBuild {
             } => (
                 InventoryNodeKind::Display,
                 joined_label(manufacturer.as_deref(), product_name.as_deref(), "Display"),
-                Some(safe_detail(connector)),
+                connector
+                    .as_deref()
+                    .map(safe_detail)
+                    .or_else(|| Some("Display location unavailable".to_owned())),
                 None,
                 None,
                 None,
@@ -288,7 +292,7 @@ fn connect_exact_edges(
                 .and_then(|parent| thunderbolt_domain_key(parent, records))
                 .or_else(|| parent_key.clone()),
             RawRecord::ThunderboltDevice { parent_key, .. } => parent_key.clone(),
-            RawRecord::Display { controller_key, .. } => Some(controller_key.clone()),
+            RawRecord::Display { controller_key, .. } => controller_key.clone(),
             RawRecord::BluetoothAdapter { controller_key, .. } => controller_key.clone(),
             RawRecord::BluetoothDevice { adapter_key, .. } => Some(adapter_key.clone()),
         };
@@ -346,7 +350,9 @@ fn valid_parent(record: &RawRecord, parent_kind: InventoryNodeKind) -> bool {
             parent_kind,
             InventoryNodeKind::Controller | InventoryNodeKind::Dock
         ),
-        RawRecord::Display { .. } => parent_kind == InventoryNodeKind::Controller,
+        RawRecord::Display { controller_key, .. } => {
+            controller_key.is_some() && parent_kind == InventoryNodeKind::Controller
+        }
         RawRecord::BluetoothAdapter { .. } => matches!(
             parent_kind,
             InventoryNodeKind::Hub | InventoryNodeKind::UsbDevice
@@ -364,37 +370,129 @@ fn attach_drivers(
     by_key: &HashMap<String, usize>,
     endpoint_to_node: &HashMap<String, usize>,
 ) {
-    for (endpoint, node_index) in endpoint_to_node {
-        let matches: Vec<(&str, &DeviceBinding)> = bindings
-            .iter()
-            .filter(|(_, binding)| binding.endpoints.iter().any(|token| token == endpoint))
-            .map(|(device_id, binding)| (device_id.as_str(), binding))
-            .collect();
-        if matches.len() != 1 {
+    let mut claims = HashMap::<usize, BTreeSet<&str>>::new();
+    for (device_id, binding) in bindings {
+        for endpoint in &binding.endpoints {
+            if let BoundEndpoint::Display(key) = endpoint
+                && let Some(index) = endpoint_to_node.get(key)
+            {
+                claims.entry(*index).or_default().insert(device_id.as_str());
+            }
+        }
+    }
+    for (index, device_id) in resolve_bluetooth(records, by_key, bindings) {
+        claims.entry(index).or_default().insert(device_id);
+    }
+    for (index, device_ids) in claims {
+        if device_ids.len() != 1 {
             continue;
         }
-        let (device_id, binding) = matches[0];
+        let device_id = *device_ids.iter().next().unwrap();
+        let Some(binding) = bindings.get(device_id) else {
+            continue;
+        };
         let Some(driver) = catalog.iter().find(|driver| driver.id == binding.driver) else {
             continue;
         };
-        nodes[*node_index].node.driver = Some(driver_badge(driver, Some(device_id), false));
+        nodes[index].node.driver = Some(driver_badge(driver, Some(device_id)));
     }
 
     for record in records {
-        let matches: Vec<(&DriverCatalogEntry, bool)> = catalog
-            .iter()
-            .filter_map(|driver| match_record(record, driver).then_some((driver, true)))
-            .collect();
-        if matches.len() != 1 {
-            continue;
-        }
         let Some(index) = by_key.get(record_key(record)).copied() else {
             continue;
         };
-        let (driver, declared_match) = matches[0];
-        let specialized = declared_match || !driver.supersedes.is_empty();
-        nodes[index].node.driver = Some(driver_badge(driver, None, specialized));
+        if nodes[index].node.driver.is_some() {
+            continue;
+        }
+        let matches: Vec<&DriverCatalogEntry> = catalog
+            .iter()
+            .filter(|driver| match_record(record, driver))
+            .collect();
+        if matches.len() == 1 {
+            nodes[index].node.driver = Some(driver_badge(matches[0], None));
+        }
     }
+}
+
+fn resolve_bluetooth<'a>(
+    records: &[RawRecord],
+    by_key: &HashMap<String, usize>,
+    bindings: &'a BTreeMap<String, DeviceBinding>,
+) -> Vec<(usize, &'a str)> {
+    let mut name_claims = HashMap::<&str, BTreeSet<(&str, &str)>>::new();
+    for (device_id, binding) in bindings {
+        for endpoint in &binding.endpoints {
+            if let BoundEndpoint::Bluetooth {
+                identity,
+                name: Some(name),
+            } = endpoint
+            {
+                name_claims
+                    .entry(name)
+                    .or_default()
+                    .insert((device_id.as_str(), identity.as_str()));
+            }
+        }
+    }
+    let name_claim_counts: HashMap<&str, usize> = name_claims
+        .into_iter()
+        .map(|(name, claims)| (name, claims.len()))
+        .collect();
+
+    let mut resolved = Vec::new();
+    for (device_id, binding) in bindings {
+        for endpoint in &binding.endpoints {
+            let BoundEndpoint::Bluetooth { identity, name } = endpoint else {
+                continue;
+            };
+            let exact: Vec<Option<usize>> = records
+                .iter()
+                .filter_map(|record| match record {
+                    RawRecord::BluetoothDevice {
+                        key,
+                        endpoint_identity: Some(record_identity),
+                        ..
+                    } if record_identity == identity => Some(by_key.get(key).copied()),
+                    _ => None,
+                })
+                .collect();
+            if !exact.is_empty() {
+                if exact.len() == 1
+                    && let Some(index) = exact[0]
+                {
+                    resolved.push((index, device_id.as_str()));
+                }
+                continue;
+            }
+
+            let Some(name) = name.as_deref() else {
+                continue;
+            };
+            if name_claim_counts.get(name).copied() != Some(1) {
+                continue;
+            }
+            let candidates: Vec<Option<usize>> = records
+                .iter()
+                .filter_map(|record| match record {
+                    RawRecord::BluetoothDevice {
+                        key,
+                        endpoint_identity: None,
+                        name: Some(record_name),
+                        ..
+                    } if bluetooth_display_name(record_name).as_deref() == Some(name) => {
+                        Some(by_key.get(key).copied())
+                    }
+                    _ => None,
+                })
+                .collect();
+            if candidates.len() == 1
+                && let Some(index) = candidates[0]
+            {
+                resolved.push((index, device_id.as_str()));
+            }
+        }
+    }
+    resolved
 }
 
 fn match_record(record: &RawRecord, driver: &DriverCatalogEntry) -> bool {
@@ -411,18 +509,14 @@ fn match_record(record: &RawRecord, driver: &DriverCatalogEntry) -> bool {
     }
 }
 
-fn driver_badge(
-    driver: &DriverCatalogEntry,
-    device_id: Option<&str>,
-    declared_match: bool,
-) -> InventoryDriver {
+fn driver_badge(driver: &DriverCatalogEntry, device_id: Option<&str>) -> InventoryDriver {
     InventoryDriver {
         id: driver.id.clone(),
         version: driver.version.clone(),
-        class: if declared_match || !driver.supersedes.is_empty() {
-            InventoryDriverClass::Specialized
-        } else {
+        class: if driver.generic {
             InventoryDriverClass::Generic
+        } else {
+            InventoryDriverClass::Specialized
         },
         device_id: device_id.map(str::to_owned),
     }
@@ -598,9 +692,12 @@ fn infer_monitor_companions(
             continue;
         }
         for (endpoint, display) in endpoint_to_node {
-            let mut matching_bindings = bindings
-                .iter()
-                .filter(|(_, binding)| binding.endpoints.iter().any(|token| token == endpoint));
+            let mut matching_bindings = bindings.iter().filter(|(_, binding)| {
+                binding
+                    .endpoints
+                    .iter()
+                    .any(|bound| matches!(bound, BoundEndpoint::Display(key) if key == endpoint))
+            });
             let Some((device_id, binding)) = matching_bindings.next() else {
                 continue;
             };
@@ -640,7 +737,7 @@ fn infer_monitor_companions(
     nodes[anchor].node.parent_id = Some(nodes[display].node.id.clone());
     nodes[anchor].node.relation = InventoryRelation::Inferred;
     nodes[anchor].node.rule = Some(InventoryRule::DriverLink);
-    nodes[matched].node.driver = Some(driver_badge(driver, Some(device_id), true));
+    nodes[matched].node.driver = Some(driver_badge(driver, Some(device_id)));
 }
 
 fn propagate_attachment(nodes: &mut [NodeBuild]) {
@@ -1002,8 +1099,8 @@ mod tests {
     fn display(endpoint: &str, controller_key: &str, product: &str) -> RawRecord {
         RawRecord::Display {
             endpoint_token: endpoint.to_owned(),
-            connector: "DP-1".to_owned(),
-            controller_key: controller_key.to_owned(),
+            connector: Some("DP-1".to_owned()),
+            controller_key: Some(controller_key.to_owned()),
             manufacturer: Some("BenQ".to_owned()),
             product_name: Some(product.to_owned()),
         }
@@ -1026,11 +1123,41 @@ mod tests {
             .unwrap()
     }
 
+    fn bluetooth_adapter() -> RawRecord {
+        RawRecord::BluetoothAdapter {
+            key: "adapter".to_owned(),
+            controller_key: None,
+            name: Some("Bluetooth".to_owned()),
+            powered: true,
+        }
+    }
+
+    fn bluetooth_device(key: &str, endpoint_identity: Option<&str>, name: &str) -> RawRecord {
+        RawRecord::BluetoothDevice {
+            key: key.to_owned(),
+            endpoint_identity: endpoint_identity.map(str::to_owned),
+            adapter_key: "adapter".to_owned(),
+            name: Some(name.to_owned()),
+            icon: None,
+            paired: true,
+            connected: false,
+        }
+    }
+
+    fn ikea_driver() -> DriverCatalogEntry {
+        DriverCatalogEntry {
+            id: "ikea-idasen".to_owned(),
+            version: "0.1.0".to_owned(),
+            generic: false,
+            inventory_matches: Vec::new(),
+        }
+    }
+
     fn monitor_driver() -> DriverCatalogEntry {
         DriverCatalogEntry {
             id: "benq-rd280u".to_owned(),
             version: "1.0.0".to_owned(),
-            supersedes: Vec::new(),
+            generic: false,
             inventory_matches: vec![InventoryMatch::Usb {
                 vendor_id: "0bda".to_owned(),
                 product_id: "1100".to_owned(),
@@ -1191,7 +1318,7 @@ mod tests {
             "monitor".to_owned(),
             DeviceBinding {
                 driver: "benq-rd280u".to_owned(),
-                endpoints: vec!["endpoint-token".to_owned()],
+                endpoints: vec![BoundEndpoint::Display("endpoint-token".to_owned())],
             },
         )]);
         let response = build(&records, &bindings, &[monitor_driver()], SALT);
@@ -1208,7 +1335,7 @@ mod tests {
         assert_eq!(badge.device_id.as_deref(), Some("monitor"));
         assert_eq!(badge.class, InventoryDriverClass::Specialized);
         let display_badge = display.driver.as_ref().unwrap();
-        assert_eq!(display_badge.class, InventoryDriverClass::Generic);
+        assert_eq!(display_badge.class, InventoryDriverClass::Specialized);
     }
 
     #[test]
@@ -1234,14 +1361,14 @@ mod tests {
                 "display-a".to_owned(),
                 DeviceBinding {
                     driver: "benq-rd280u".to_owned(),
-                    endpoints: vec!["endpoint-a".to_owned()],
+                    endpoints: vec![BoundEndpoint::Display("endpoint-a".to_owned())],
                 },
             ),
             (
                 "display-b".to_owned(),
                 DeviceBinding {
                     driver: "other-monitor".to_owned(),
-                    endpoints: vec!["endpoint-b".to_owned()],
+                    endpoints: vec![BoundEndpoint::Display("endpoint-b".to_owned())],
                 },
             ),
         ]);
@@ -1302,7 +1429,7 @@ mod tests {
             "monitor".to_owned(),
             DeviceBinding {
                 driver: "benq-rd280u".to_owned(),
-                endpoints: vec!["endpoint-token".to_owned()],
+                endpoints: vec![BoundEndpoint::Display("endpoint-token".to_owned())],
             },
         )]);
         let response = build(&records, &bindings, &[monitor_driver()], SALT);
@@ -1318,7 +1445,7 @@ mod tests {
     }
 
     #[test]
-    fn driver_class_comes_from_supersedes_or_manifest_declarations() {
+    fn driver_class_comes_from_manifest_generic_flag() {
         let records = vec![
             controller("gpu0", Bus::Display),
             display("endpoint-generic", "gpu0", "Generic panel"),
@@ -1329,14 +1456,14 @@ mod tests {
                 "generic-device".to_owned(),
                 DeviceBinding {
                     driver: "generic-ddc".to_owned(),
-                    endpoints: vec!["endpoint-generic".to_owned()],
+                    endpoints: vec![BoundEndpoint::Display("endpoint-generic".to_owned())],
                 },
             ),
             (
                 "specialized-device".to_owned(),
                 DeviceBinding {
                     driver: "specialized-ddc".to_owned(),
-                    endpoints: vec!["endpoint-specialized".to_owned()],
+                    endpoints: vec![BoundEndpoint::Display("endpoint-specialized".to_owned())],
                 },
             ),
         ]);
@@ -1344,7 +1471,7 @@ mod tests {
             DriverCatalogEntry {
                 id: "generic-ddc".to_owned(),
                 version: "1.2.3".to_owned(),
-                supersedes: Vec::new(),
+                generic: true,
                 inventory_matches: vec![InventoryMatch::Usb {
                     vendor_id: "ffff".to_owned(),
                     product_id: "ffff".to_owned(),
@@ -1354,7 +1481,7 @@ mod tests {
             DriverCatalogEntry {
                 id: "specialized-ddc".to_owned(),
                 version: "2.0.0".to_owned(),
-                supersedes: vec!["generic-ddc".to_owned()],
+                generic: false,
                 inventory_matches: Vec::new(),
             },
         ];
@@ -1378,6 +1505,133 @@ mod tests {
     }
 
     #[test]
+    fn bluetooth_binding_prefers_exact_identity() {
+        let records = vec![
+            bluetooth_adapter(),
+            bluetooth_device("desk-a", Some("id-a"), "Desk 1234"),
+            bluetooth_device("desk-b", Some("id-b"), "Desk 5678"),
+        ];
+        let bindings = BTreeMap::from([(
+            "desk".to_owned(),
+            DeviceBinding {
+                driver: "ikea-idasen".to_owned(),
+                endpoints: vec![BoundEndpoint::Bluetooth {
+                    identity: "id-a".to_owned(),
+                    name: Some("Desk 5678".to_owned()),
+                }],
+            },
+        )]);
+        let response = build(&records, &bindings, &[ikea_driver()], SALT);
+        let matched = node(&response, "Desk 1234").driver.as_ref().unwrap();
+        assert_eq!(matched.id, "ikea-idasen");
+        assert_eq!(matched.device_id.as_deref(), Some("desk"));
+        assert_eq!(matched.class, InventoryDriverClass::Specialized);
+        assert!(node(&response, "Desk 5678").driver.is_none());
+    }
+
+    #[test]
+    fn bluetooth_name_join_requires_uniqueness_on_both_sides() {
+        let one_record = vec![
+            bluetooth_adapter(),
+            bluetooth_device("paired-one", None, "Desk 1234"),
+        ];
+        let one_binding = BTreeMap::from([(
+            "desk".to_owned(),
+            DeviceBinding {
+                driver: "ikea-idasen".to_owned(),
+                endpoints: vec![BoundEndpoint::Bluetooth {
+                    identity: "endpoint-a".to_owned(),
+                    name: Some("Desk 1234".to_owned()),
+                }],
+            },
+        )]);
+        let unique = build(&one_record, &one_binding, &[ikea_driver()], SALT);
+        assert_eq!(
+            node(&unique, "Desk 1234")
+                .driver
+                .as_ref()
+                .unwrap()
+                .device_id
+                .as_deref(),
+            Some("desk")
+        );
+
+        let duplicate_records = vec![
+            bluetooth_adapter(),
+            bluetooth_device("paired-a", None, "Desk 1234"),
+            bluetooth_device("paired-b", None, "Desk 1234"),
+        ];
+        let duplicate_nodes = build(&duplicate_records, &one_binding, &[ikea_driver()], SALT);
+        let duplicate_names: Vec<_> = duplicate_nodes
+            .nodes
+            .iter()
+            .filter(|candidate| candidate.label == "Desk 1234")
+            .collect();
+        assert_eq!(duplicate_names.len(), 2);
+        assert!(
+            duplicate_names
+                .iter()
+                .all(|candidate| candidate.driver.is_none())
+        );
+
+        let competing_bindings = BTreeMap::from([
+            (
+                "desk-a".to_owned(),
+                DeviceBinding {
+                    driver: "ikea-idasen".to_owned(),
+                    endpoints: vec![BoundEndpoint::Bluetooth {
+                        identity: "endpoint-a".to_owned(),
+                        name: Some("Desk 1234".to_owned()),
+                    }],
+                },
+            ),
+            (
+                "desk-b".to_owned(),
+                DeviceBinding {
+                    driver: "ikea-idasen".to_owned(),
+                    endpoints: vec![BoundEndpoint::Bluetooth {
+                        identity: "endpoint-b".to_owned(),
+                        name: Some("Desk 1234".to_owned()),
+                    }],
+                },
+            ),
+        ]);
+        let competing = build(&one_record, &competing_bindings, &[ikea_driver()], SALT);
+        assert!(node(&competing, "Desk 1234").driver.is_none());
+    }
+
+    #[test]
+    fn binding_badge_overrides_selector_badge() {
+        let records = vec![
+            bluetooth_adapter(),
+            bluetooth_device("paired-desk", Some("id-a"), "Desk 1234"),
+        ];
+        let bindings = BTreeMap::from([(
+            "desk".to_owned(),
+            DeviceBinding {
+                driver: "ikea-idasen".to_owned(),
+                endpoints: vec![BoundEndpoint::Bluetooth {
+                    identity: "id-a".to_owned(),
+                    name: Some("Desk 1234".to_owned()),
+                }],
+            },
+        )]);
+        let selector = DriverCatalogEntry {
+            id: "desk-selector".to_owned(),
+            version: "0.1.0".to_owned(),
+            generic: false,
+            inventory_matches: vec![InventoryMatch::Bluetooth {
+                name_prefix: "Desk".to_owned(),
+                role: InventoryRole::Device,
+            }],
+        };
+        let response = build(&records, &bindings, &[ikea_driver(), selector], SALT);
+        let badge = node(&response, "Desk 1234").driver.as_ref().unwrap();
+        assert_eq!(badge.id, "ikea-idasen");
+        assert_eq!(badge.device_id.as_deref(), Some("desk"));
+    }
+
+    #[test]
     fn public_ids_and_labels_do_not_reveal_native_keys_addresses_or_paths() {
         let native_key = "/sys/devices/pci0000:68/0000:68:00.3/usb5/5-1/J7R0093601Q";
         let records = vec![
@@ -1395,8 +1649,8 @@ mod tests {
             },
             RawRecord::Display {
                 endpoint_token: "/dev/i2c-7".to_owned(),
-                connector: "DP-1".to_owned(),
-                controller_key: "gpu0".to_owned(),
+                connector: Some("DP-1".to_owned()),
+                controller_key: Some("gpu0".to_owned()),
                 manufacturer: Some("BenQ".to_owned()),
                 product_name: Some("RD280U".to_owned()),
             },
@@ -1408,6 +1662,7 @@ mod tests {
             },
             RawRecord::BluetoothDevice {
                 key: "/org/bluez/hci0/dev_01_23_45_67_89_AB".to_owned(),
+                endpoint_identity: None,
                 adapter_key: "hci0".to_owned(),
                 name: Some("Keyboard 01:23:45:67:89:AB".to_owned()),
                 icon: Some("input-keyboard".to_owned()),
@@ -1444,6 +1699,7 @@ mod tests {
         let records: Vec<RawRecord> = (0..(MAX_INVENTORY_NODES + 20))
             .map(|index| RawRecord::BluetoothDevice {
                 key: format!("device-{index}"),
+                endpoint_identity: None,
                 adapter_key: "missing-adapter".to_owned(),
                 name: Some(format!("Device {index}")),
                 icon: None,

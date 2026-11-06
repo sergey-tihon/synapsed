@@ -12,51 +12,82 @@ import {
   type WillAppearEvent,
   type WillDisappearEvent,
 } from "@elgato/streamdeck";
-import type { ActionSettings } from "./settings.js";
+import { DIAL_ACTION_UUID, KEY_ACTION_UUID, type DialSettings, type KeySettings } from "./settings.js";
 import type { Contexts } from "./contexts.js";
 import { clampDialTicks } from "./model.js";
 
-@action({ UUID: "com.sergey-tihon.synapsed.characteristic" })
-export class CharacteristicAction extends SingletonAction<ActionSettings> {
+@action({ UUID: KEY_ACTION_UUID })
+export class KeyAction extends SingletonAction<KeySettings> {
   constructor(private readonly contexts: Contexts) {
     super();
   }
 
-  override onWillAppear(ev: WillAppearEvent<ActionSettings>): void {
-    this.contexts.appear(ev.action, ev.payload.settings);
+  override onWillAppear(ev: WillAppearEvent<KeySettings>): void {
+    this.contexts.appear(ev.action, "key", ev.payload.settings);
   }
 
-  override onWillDisappear(ev: WillDisappearEvent<ActionSettings>): void {
+  override onWillDisappear(ev: WillDisappearEvent<KeySettings>): void {
     this.contexts.disappear(ev.action.id);
   }
 
-  override onDidReceiveSettings(ev: DidReceiveSettingsEvent<ActionSettings>): void {
+  override onDidReceiveSettings(ev: DidReceiveSettingsEvent<KeySettings>): void {
     this.contexts.settingsChanged(ev.action.id, ev.payload.settings);
   }
 
-  override onPropertyInspectorDidAppear(ev: PropertyInspectorDidAppearEvent<ActionSettings>): Promise<void> {
+  override onPropertyInspectorDidAppear(ev: PropertyInspectorDidAppearEvent<KeySettings>): Promise<void> {
     return this.contexts.inspectorAppeared(ev.action);
   }
 
-  override onPropertyInspectorDidDisappear(ev: PropertyInspectorDidDisappearEvent<ActionSettings>): void {
+  override onPropertyInspectorDidDisappear(ev: PropertyInspectorDidDisappearEvent<KeySettings>): void {
     this.contexts.inspectorDisappeared(ev.action.id);
   }
 
-  override onSendToPlugin(ev: SendToPluginEvent<JsonValue, ActionSettings>): void {
+  override onSendToPlugin(ev: SendToPluginEvent<JsonValue, KeySettings>): void {
     this.contexts.inspectorRequest(ev.action.id, ev.payload);
   }
 
-  override onKeyDown(ev: KeyDownEvent<ActionSettings>): Promise<void> {
+  override onKeyDown(ev: KeyDownEvent<KeySettings>): Promise<void> {
     this.contexts.settingsChanged(ev.action.id, ev.payload.settings);
     return this.contexts.trigger(ev.action.id, "key");
   }
+}
 
-  override onDialDown(ev: DialDownEvent<ActionSettings>): Promise<void> {
+@action({ UUID: DIAL_ACTION_UUID })
+export class DialAction extends SingletonAction<DialSettings> {
+  constructor(private readonly contexts: Contexts) {
+    super();
+  }
+
+  override onWillAppear(ev: WillAppearEvent<DialSettings>): void {
+    this.contexts.appear(ev.action, "dial", ev.payload.settings);
+  }
+
+  override onWillDisappear(ev: WillDisappearEvent<DialSettings>): void {
+    this.contexts.disappear(ev.action.id);
+  }
+
+  override onDidReceiveSettings(ev: DidReceiveSettingsEvent<DialSettings>): void {
+    this.contexts.settingsChanged(ev.action.id, ev.payload.settings);
+  }
+
+  override onPropertyInspectorDidAppear(ev: PropertyInspectorDidAppearEvent<DialSettings>): Promise<void> {
+    return this.contexts.inspectorAppeared(ev.action);
+  }
+
+  override onPropertyInspectorDidDisappear(ev: PropertyInspectorDidDisappearEvent<DialSettings>): void {
+    this.contexts.inspectorDisappeared(ev.action.id);
+  }
+
+  override onSendToPlugin(ev: SendToPluginEvent<JsonValue, DialSettings>): void {
+    this.contexts.inspectorRequest(ev.action.id, ev.payload);
+  }
+
+  override onDialDown(ev: DialDownEvent<DialSettings>): Promise<void> {
     this.contexts.settingsChanged(ev.action.id, ev.payload.settings);
     return this.contexts.trigger(ev.action.id, "press");
   }
 
-  override onDialRotate(ev: DialRotateEvent<ActionSettings>): Promise<void> {
+  override onDialRotate(ev: DialRotateEvent<DialSettings>): Promise<void> {
     this.contexts.settingsChanged(ev.action.id, ev.payload.settings);
     const steps = clampDialTicks(ev.payload.ticks);
     if (!Number.isFinite(steps) || steps === 0) return Promise.resolve();

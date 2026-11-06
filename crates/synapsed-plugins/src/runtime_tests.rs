@@ -300,6 +300,7 @@ async fn lua_faults_older_timer_report_cannot_replace_confirmation_but_fatal_lat
                 candidates: BTreeMap::from([("typed-fixture".into(), vec![candidate.clone()])]),
                 failed: BTreeMap::new(),
                 quarantined: BTreeSet::new(),
+                restart_blocked: BTreeSet::new(),
                 routes: BTreeMap::from([(
                     "fixture".into(),
                     Route {
@@ -318,6 +319,9 @@ async fn lua_faults_older_timer_report_cannot_replace_confirmation_but_fatal_lat
                 dominance: BTreeMap::new(),
                 current: Arc::new(Mutex::new(None)),
                 binding_updates: tokio::sync::watch::channel(Arc::new(BTreeMap::new())).0,
+                events: mpsc::channel(64).0,
+                accepting: Arc::new(AtomicBool::new(true)),
+                settings: BTreeMap::new(),
                 #[cfg(debug_assertions)]
                 discovery_round: 0,
             };

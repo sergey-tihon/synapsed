@@ -46,6 +46,7 @@ export interface SynapsedClient {
     command: CharacteristicCommand,
     options?: RequestOptions,
   ): Promise<Snapshot>;
+  restartDriver(driverId: string, options?: RequestOptions): Promise<Snapshot>;
   getLogs(options?: RequestOptions): Promise<LogsResponse>;
   subscribe(callbacks: SubscriptionCallbacks): () => void;
   close(): void;
@@ -67,8 +68,8 @@ export class ApiRequestError extends Error {
   }
 }
 export class RequestTimeoutError extends Error {
-  constructor() {
-    super(`The Synapsed request timed out after ${TIMEOUT_MS / 1_000} seconds.`);
+  constructor(timeoutMs = TIMEOUT_MS) {
+    super(`The Synapsed request timed out after ${timeoutMs / 1_000} seconds.`);
     this.name = "RequestTimeoutError";
   }
 }
@@ -106,6 +107,7 @@ export function validateBaseUrl(baseUrl: string): URL {
 }
 
 const TIMEOUT_MS = 5_000;
+const DRIVER_RESTART_TIMEOUT_MS = 65_000;
 const RECONNECT_MS = [1_000, 2_000, 4_000, 8_000, 10_000] as const;
 const LOG_LIMIT = 200;
 function newer(a: string, b: string): boolean {
@@ -205,6 +207,16 @@ class NativeClient implements SynapsedClient {
       command,
     );
   }
+  restartDriver(driverId: string, options?: RequestOptions): Promise<Snapshot> {
+    return this.request(
+      `/api/v1/drivers/${encodeURIComponent(driverId)}/restart`,
+      "Snapshot",
+      (data) => this.acceptHttpSnapshot(validateSnapshot(data)),
+      options,
+      {},
+      DRIVER_RESTART_TIMEOUT_MS,
+    );
+  }
   getLogs(options?: RequestOptions): Promise<LogsResponse> {
     return this.request(
       "/api/v1/logs",
@@ -287,7 +299,8 @@ class NativeClient implements SynapsedClient {
     schemaName: "Snapshot" | "StatusResponse" | "DeviceResponse" | "LogsResponse" | "InventoryResponse",
     validate: (value: unknown) => T,
     options?: RequestOptions,
-    command?: CharacteristicCommand,
+    body?: unknown,
+    timeoutMs = TIMEOUT_MS,
   ): Promise<T> {
     this.ensureUsable();
     if (options?.signal?.aborted) throw options.signal.reason ?? abortError();
@@ -300,14 +313,14 @@ class NativeClient implements SynapsedClient {
     const timeout: ReturnType<typeof setTimeout> = setTimeout(() => {
       timedOut = true;
       controller.abort();
-    }, TIMEOUT_MS);
+    }, timeoutMs);
     try {
       const response = await fetch(new URL(path, this.baseUrl), {
-        method: command ? "POST" : "GET",
+        method: body === undefined ? "GET" : "POST",
         credentials: "omit",
         redirect: "error",
         signal: controller.signal,
-        ...(command ? { headers: { "Content-Type": "application/json" }, body: JSON.stringify(command) } : {}),
+        ...(body !== undefined ? { headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) } : {}),
       });
       if (this.closed || generation !== this.generation) {
         controller.abort();
@@ -331,7 +344,7 @@ class NativeClient implements SynapsedClient {
       }
       return validate(data);
     } catch (error) {
-      if (timedOut) throw new RequestTimeoutError();
+      if (timedOut) throw new RequestTimeoutError(timeoutMs);
       if (options?.signal?.aborted) throw options.signal.reason ?? abortError();
       if (
         error instanceof ProtocolValidationError ||
