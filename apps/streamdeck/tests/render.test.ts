@@ -1,86 +1,117 @@
+import type { Characteristic, ClientStatus, Device } from "@synapsed/client";
 import { describe, expect, it } from "vitest";
-import type { ActionSettings } from "../src/settings.js";
-import { renderDisplay } from "../src/render.js";
+import { inspectorReading, renderDial, renderKey } from "../src/render.js";
+import { buildCatalog } from "../src/catalog.js";
 import { characteristic, device, snapshot } from "./fixtures.js";
 
-const binding = { deviceId: "monitor", characteristicId: "brightness" };
-const render = (
-  settings: ActionSettings = {},
+const key = (
+  settings: Parameters<typeof renderKey>[0] = {},
   state = snapshot(),
-  connection: "connected" | "connecting" | "disconnected" | "incompatible" = "connected",
+  connection = "connected",
   pending = false,
-) => renderDisplay(settings, state, connection, pending);
+) => renderKey(settings, state, connection as "connected" | "connecting" | "disconnected" | "incompatible", pending);
 
-describe("renderDisplay", () => {
-  it("renders configure and invalid settings states", () => {
-    expect(render().title).toBe("Synapsed\nConfigure");
-    expect(render({ keyCommand: { op: "bad" } as never }).title).toBe("Synapsed\nUnsupported");
-  });
+const inspectorReadingFor = (
+  connection: ClientStatus,
+  item: Characteristic,
+  deviceStatus: Device["status"] = "online",
+): string => {
+  const catalogDevice = buildCatalog(snapshot([device([item], deviceStatus)]), connection).devices[0]!;
+  return inspectorReading(connection, catalogDevice, catalogDevice.characteristics[0]!);
+};
 
-  it("renders connection and missing-binding states", () => {
-    expect(render({ binding }, snapshot(), "incompatible").title).toContain("Incompatible");
-    expect(render({ binding }, snapshot([])).title).toBe("Synapsed · Missing\nMissing");
-    expect(render({ binding }, snapshot(), "connecting").title).toContain("Connecting");
-    expect(render({ binding }, snapshot(), "disconnected").title).toContain("Service Offline");
-  });
-
-  it("marks unavailable device and characteristic observations as stale", () => {
-    expect(render({ binding }, snapshot([device(undefined, "unavailable")])).title).toContain("Device unavailable");
-    expect(render({ binding }, snapshot([device([characteristic("number", 50, "unavailable")])])).title).toContain(
-      "Unavailable",
+describe("Key rendering", () => {
+  it("shows device, characteristic and observed value, with custom title replacing the labels", () => {
+    expect(key({ deviceId: "monitor", characteristicId: "brightness", command: { op: "step", steps: 1 } })).toBe(
+      "Monitor\nBrightness\n50 %",
     );
-    expect(render({ binding }, snapshot([device([characteristic("number", 50, "error")])])).title).toContain(
-      "Characteristic error",
-    );
+    expect(
+      key({
+        deviceId: "monitor",
+        characteristicId: "brightness",
+        command: { op: "step", steps: 1 },
+        title: "Desk up",
+      }),
+    ).toBe("Desk up\n50 %");
   });
 
-  it("reports driver conflict and unsupported saved commands", () => {
-    const conflict = device();
-    conflict.error = { code: "driver_conflict", message: "conflict" };
-    expect(render({ binding }, snapshot([conflict])).title).toContain("Driver conflict");
-    expect(render({ binding, keyCommand: { op: "toggle" } }, snapshot()).title).toContain("Unsupported");
+  it("renders read-only characteristics as display-only keys", () => {
+    const settings = { deviceId: "monitor", characteristicId: "brightness" };
+    const state = snapshot([device([characteristic("number", 50, "ok", false)])]);
+    expect(key(settings, state)).toBe("Monitor\nBrightness\n50 %");
+    expect(key(settings, state, "disconnected")).toBe("Monitor\nBrightness\n50 % (stale)");
+    const action = snapshot([device([characteristic("action", null, "ok", false)])]);
+    expect(key(settings, action)).toBe("Monitor\nBrightness\nUnsupported");
+  });
+  it("shows a compact target while preserving stale readings", () => {
+    const settings = { deviceId: "monitor", characteristicId: "brightness", command: { op: "set", value: 80 } };
+    expect(key(settings)).toBe("Monitor\nBrightness\nto 80%");
+    expect(key(settings, snapshot(), "disconnected")).toBe("Monitor\nBrightness\n50 % (stale) · to 80%");
   });
 
-  it("renders a missing or unsupported secondary press binding", () => {
-    expect(render({ binding, pressBinding: { deviceId: "missing", characteristicId: "power" } }).title).toContain(
-      "Missing press binding",
-    );
-    expect(render({ binding, pressCommand: { op: "set", value: "bad" } }, snapshot()).title).toContain(
-      "Unsupported press",
-    );
+  it("shows configure, unsupported commands and missing command states", () => {
+    expect(key()).toBe("Synapsed\nConfigure");
+    expect(key({ deviceId: "monitor", characteristicId: "brightness" })).toBe("Monitor\nBrightness\nChoose action");
+    expect(key({ title: 7 } as never)).toBe("Synapsed\nUnsupported");
   });
 
-  it("includes a secondary boolean value and pending status", () => {
+  it("retains stale readings and appends pending status", () => {
+    const settings = { deviceId: "monitor", characteristicId: "brightness", command: { op: "step", steps: 1 } };
+    expect(key(settings, snapshot(), "disconnected").split("\n").at(-1)).toBe("50 % (stale)");
+    expect(key(settings, snapshot(), "connected", true)).toBe("Monitor\nBrightness\n50 % · Pending");
+  });
+
+  it("omits the value line for healthy action characteristics", () => {
+    const state = snapshot([device([characteristic("action", null)])]);
+    expect(key({ deviceId: "monitor", characteristicId: "brightness", command: { op: "invoke" } }, state)).toBe(
+      "Monitor\nBrightness",
+    );
+  });
+});
+
+describe("Dial rendering", () => {
+  it("shows a title, authoritative value and bounded numeric feedback", () => {
+    const output = renderDial({ deviceId: "monitor", characteristicId: "brightness" }, snapshot(), "connected", false);
+    expect(output.title).toBe("Monitor · Brightness");
+    expect(output.current).toBe("50 %");
+    expect(output.bar).toEqual({ value: 50, enabled: true });
+  });
+
+  it("includes the same-device boolean press reading in the title", () => {
     const state = snapshot([
       device([characteristic(), { ...characteristic("boolean", true), id: "power", label: "Power" }]),
     ]);
-    const output = render(
-      { binding, pressBinding: { deviceId: "monitor", characteristicId: "power" } },
+    const output = renderDial(
+      {
+        deviceId: "monitor",
+        characteristicId: "brightness",
+        pressCharacteristicId: "power",
+        pressCommand: { op: "toggle" },
+      },
       state,
       "connected",
-      true,
+      false,
     );
-    expect(output.title).toContain("Power: On");
-    expect(output.title).toContain("Pending");
+    expect(output.title).toBe("Monitor · Brightness · Power: On");
+  });
+});
+
+describe("Inspector reading", () => {
+  it("marks healthy readings current", () => {
+    expect(inspectorReadingFor("connected", characteristic())).toBe("Current: 50 %");
   });
 
-  it("renders bounded numeric and enum feedback", () => {
-    const number = render({ binding }, snapshot());
-    expect(number.feedback.bar.enabled).toBe(true);
-    expect(number.feedback.bar.value).toBe(50);
-    const enumState = snapshot([device([characteristic("enum", "high")])]);
-    const enumeration = render({ binding }, enumState);
-    expect(enumeration.title).toContain("High");
-    expect(enumeration.feedback.bar.enabled).toBe(true);
-    expect(enumeration.feedback.bar.value).toBe(100);
+  it("marks disconnected readings stale", () => {
+    expect(inspectorReadingFor("disconnected", characteristic())).toBe("Last known: 50 % (stale) · Service Offline");
   });
 
-  it("renders action and text values without a feedback range", () => {
-    const action = render({ binding }, snapshot([device([characteristic("action", null)])]));
-    expect(action.title).toContain("Action");
-    expect(action.feedback.bar.enabled).toBe(false);
-    const text = render({ binding }, snapshot([device([characteristic("string", "hello")])]));
-    expect(text.title).toContain("hello");
-    expect(text.feedback.bar.enabled).toBe(false);
+  it("reports unavailable devices with the last known value", () => {
+    expect(inspectorReadingFor("connected", characteristic(), "unavailable")).toBe(
+      "Last known: 50 % (stale) · Device unavailable",
+    );
+  });
+
+  it("reports characteristic errors without a stale value", () => {
+    expect(inspectorReadingFor("connected", characteristic("number", null, "error"))).toBe("Characteristic error");
   });
 });

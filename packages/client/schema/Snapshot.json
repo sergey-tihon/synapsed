@@ -520,6 +520,11 @@
           "type": "string"
         },
         {
+          "const": "unknown_driver",
+          "description": "The requested driver does not exist.",
+          "type": "string"
+        },
+        {
           "const": "unknown_characteristic",
           "description": "The requested characteristic does not exist.",
           "type": "string"
@@ -557,6 +562,11 @@
         {
           "const": "ddc_error",
           "description": "A DDC transport operation failed.",
+          "type": "string"
+        },
+        {
+          "const": "bluetooth_error",
+          "description": "A Bluetooth transport operation failed.",
           "type": "string"
         },
         {

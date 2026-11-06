@@ -17,15 +17,16 @@ use std::{
     collections::HashMap,
     sync::{
         Arc,
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicBool, Ordering},
         mpsc::{self, SyncSender, TrySendError},
     },
     thread,
     time::{Duration, Instant},
 };
+use synapsed_core::EndpointDescriptor;
 /// Shared error and endpoint identity types from the core crate.
 pub use synapsed_core::{DriverError, EndpointToken, ErrorCode};
-use synapsed_core::{OperationContext, OperationState, TransportOutcome};
+use synapsed_core::{OperationContext, OperationState, TransportOutcome, allocate_endpoint_id};
 use tokio::sync::{Notify, oneshot};
 
 const MAILBOX_SIZE: usize = 64;
@@ -34,7 +35,6 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_ENDPOINTS: usize = 256;
 const MAX_ENDPOINT_HISTORY: usize = 4096;
 const MAX_FRESH_READS: usize = 4096;
-static ENDPOINT_IDS: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -44,23 +44,6 @@ pub struct VcpValue {
     pub current: u16,
     /// Maximum supported value reported by the display.
     pub maximum: u16,
-}
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-/// Public metadata for an endpoint discovered by a DDC scan.
-pub struct EndpointDescriptor {
-    /// Token used to authorize operations on this endpoint generation.
-    pub token: EndpointToken,
-    /// Capability identifier advertised for this endpoint.
-    pub capability: String,
-    /// Three-letter manufacturer code when valid EDID data is available.
-    pub manufacturer: Option<String>,
-    /// Manufacturer-specific product code when available.
-    pub product: Option<u16>,
-    /// Product name decoded from valid base EDID data, when available.
-    pub product_name: Option<String>,
-    /// Opaque stable identity derived from validated base EDID data.
-    pub identity: Option<String>,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -495,7 +478,7 @@ impl Owner {
                 .entry(endpoint.key)
                 .or_insert_with(|| EndpointRecord {
                     token: EndpointToken {
-                        id: ENDPOINT_IDS.fetch_add(1, Ordering::Relaxed),
+                        id: allocate_endpoint_id(),
                         generation: 0,
                     },
                     identity: None,

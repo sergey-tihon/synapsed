@@ -17,6 +17,7 @@ export interface ViewState {
   connection: ClientStatus;
   error?: string;
   pending: ReadonlySet<string>;
+  restartingDrivers: ReadonlySet<string>;
 }
 export { bindingKey, displayValue } from "./model";
 export class Session {
@@ -28,7 +29,12 @@ export class Session {
   private generation = 0;
   private readGeneration = 0;
   private busy = new Set<string>();
-  private state: ViewState = { connection: "connecting", pending: new Set() };
+  private restartingDrivers = new Set<string>();
+  private state: ViewState = {
+    connection: "connecting",
+    pending: new Set(),
+    restartingDrivers: new Set(),
+  };
   subscribe = (listener: () => void) => {
     this.listeners.add(listener);
     return () => {
@@ -46,8 +52,12 @@ export class Session {
     // A restart (e.g. endpoint change) must not inherit pending commands or data
     // from the previous connection; their completions are dropped by generation.
     this.busy.clear();
-    this.state = { connection: "connecting", pending: new Set() };
-    this.listeners.forEach((listener) => listener());
+    this.restartingDrivers.clear();
+    this.state = {
+      connection: "connecting",
+      pending: new Set(),
+      restartingDrivers: new Set(),
+    };
     this.abort = new AbortController();
     try {
       this.client = createClient({ baseUrl: endpoint });
@@ -101,6 +111,7 @@ export class Session {
     this.unsubscribe?.();
     this.client?.close();
     this.busy.clear();
+    this.restartingDrivers.clear();
   }
   async execute(deviceId: string, characteristicId: string, command: CharacteristicCommand): Promise<boolean> {
     const snapshot = this.state.snapshot;
@@ -181,6 +192,44 @@ export class Session {
       if (generation === this.generation) {
         this.busy.delete(key);
         if (this.live) this.update({ pending: new Set(this.busy) });
+      }
+      if ((!this.live || generation !== this.generation) && toast) await toast.hide();
+    }
+  }
+  async restartDriver(driverId: string): Promise<void> {
+    const client = this.client;
+    const signal = this.abort?.signal;
+    const generation = this.generation;
+    if (!this.live || !client || this.state.connection !== "connected" || !signal) {
+      await showToast({
+        style: Toast.Style.Failure,
+        title: "Driver restart unavailable",
+        message: "Reconnect to the local Synapsed service and try again.",
+      });
+      return;
+    }
+    if (this.restartingDrivers.has(driverId)) return;
+    this.restartingDrivers.add(driverId);
+    this.update({ restartingDrivers: new Set(this.restartingDrivers) });
+    let toast: Toast | undefined;
+    try {
+      toast = await showToast({ style: Toast.Style.Animated, title: `Restarting ${driverId}` });
+      const observed = await client.restartDriver(driverId, { signal });
+      if (!this.live || generation !== this.generation) return;
+      const status = observed.drivers.find((driver) => driver.id === driverId);
+      toast.style = Toast.Style.Success;
+      toast.title = "Driver restarted";
+      toast.message = status ? `${driverId}: ${status.state}` : "Restart completed; status unavailable.";
+    } catch (error) {
+      if (this.live && generation === this.generation && toast) {
+        toast.style = Toast.Style.Failure;
+        toast.title = "Driver restart failed";
+        toast.message = error instanceof Error ? error.message : "Restart request failed.";
+      }
+    } finally {
+      if (generation === this.generation) {
+        this.restartingDrivers.delete(driverId);
+        if (this.live) this.update({ restartingDrivers: new Set(this.restartingDrivers) });
       }
       if ((!this.live || generation !== this.generation) && toast) await toast.hide();
     }

@@ -6,7 +6,7 @@ A Rust user daemon for macOS Apple Silicon and Linux x86_64, with deployed Lua h
 
 ![Synapsed architecture diagram showing clients, the local daemon and plugin host, driver abstractions, and hardware layers](docs/synapsed-architecture.png)
 
-The Local API, web UI, Stream Deck, Omarchy, macOS tray, Raycast, `synapsectl`, Lua plugin host, and current DDC/CI drivers are implemented. The Home Assistant plugin and the USB, Bluetooth, network, and serial driver/channel blocks are planned or illustrative extension points, not shipped capabilities; this phase remains loopback-only.
+The Local API, web UI, Stream Deck, Omarchy, macOS tray, Raycast, `synapsectl`, Lua plugin host, current DDC/CI drivers, and the optional IKEA IDÅSEN Bluetooth LE desk driver are implemented. The Home Assistant plugin and USB device-control, network, and serial driver/channel blocks remain planned or illustrative; this phase remains loopback-only.
 
 ## Requirements and boundaries
 
@@ -15,6 +15,7 @@ The Local API, web UI, Stream Deck, Omarchy, macOS tray, Raycast, `synapsectl`, 
 - The pinned Raycast 2 client requires the current Apple Silicon/macOS Tahoe app and a signed-in account. Its host runtime is separate from developer Node.
 - Linux DDC uses `i2c-dev` and distro-specific device/group permissions. Do not use forced access, auto-sudo or `chmod 666`.
 - DDC/CI must be enabled in the monitor OSD. Linux also skips i2c adapters whose DRM connector reports `enabled` = `disabled`; shipped monitor drivers refuse multiple candidates and eligible access failures that prevent unique selection.
+- The optional IKEA IDÅSEN package uses native Bluetooth. macOS embeds its Bluetooth usage description; Linux requires the existing BlueZ/D-Bus environment. No Bluetooth service or device permissions are changed automatically.
 - This phase is loopback-only, not OS-user authentication. No token, LAN discovery, Home Assistant or credential-device integration is implemented.
 
 Installed Lua is **trusted local code**. The allowlist, instruction/memory/deadline budgets, endpoint leases and quarantine limit ordinary failures; they do not guarantee termination of hostile native/non-yieldable code. New drivers using registered capabilities deploy without rebuilding clients or the host; new native transports require a Rust capability implementation.
@@ -41,9 +42,11 @@ deploy/systemd/install.sh
 deploy/systemd/install.sh --generic-only
 # Optional: do not install the Omarchy widget:
 deploy/systemd/install.sh --no-omarchy
+# Optional: install the IKEA IDÅSEN Bluetooth driver:
+deploy/systemd/install.sh --idasen
 ```
 
-The installer installs the binaries, selected external drivers, a default config only when one is absent, and the systemd user unit under `~/.config/systemd/user`. It persists the resolved XDG config/data/state paths in a service drop-in, so custom paths from the installing shell remain available to the daemon. It does not start or enable the service, use sudo, or change device permissions. After checking the config, explicitly start it with the [user service commands below](#run-continuously). `--generic-only` skips installing `benq-rd280u`; `--no-omarchy` skips the widget.
+The installer installs the binaries, selected external drivers, a default config only when one is absent, and the systemd user unit under `~/.config/systemd/user`. It persists the resolved XDG config/data/state paths in a service drop-in, so custom paths from the installing shell remain available to the daemon. It does not start or enable the service, use sudo, or change device permissions. After checking the config, explicitly start it with the [user service commands below](#run-continuously). `--generic-only` skips installing `benq-rd280u`; `--idasen` opts into `ikea-idasen`; `--no-omarchy` skips the widget.
 
 ### macOS
 
@@ -58,6 +61,8 @@ export PATH="$HOME/.local/bin:$PATH"
 cp -R drivers/generic-ddc "$data_home/synapsed/drivers/"
 # Optional verified BenQ behavior; generic-ddc is its required dependency:
 cp -R drivers/benq-rd280u "$data_home/synapsed/drivers/"
+# Optional Bluetooth desk controls:
+cp -R drivers/ikea-idasen "$data_home/synapsed/drivers/"
 if [ ! -e "$config_home/synapsed/config.toml" ]; then
   cp deploy/config.example.toml "$config_home/synapsed/config.toml"
 fi
@@ -89,7 +94,7 @@ launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/com.sergey-tihon.
 launchctl bootout "gui/$(id -u)" "$HOME/Library/LaunchAgents/com.sergey-tihon.synapsed.plist"
 ```
 
-The macOS installer materializes and validates absolute paths only; it does not start the service. Logs go to private state files.
+The macOS installer materializes and validates absolute paths, and persists the resolved XDG config/data/state directories in the LaunchAgent environment so the daemon can find the installed config and drivers. It does not start the service. Logs go to private state files.
 
 Linux: the installer already placed the user unit. Start or stop it explicitly:
 
@@ -125,7 +130,7 @@ IDs come from the current catalog, not a reserved monitor slot. `set` parses the
 
 Open the downloaded `.streamDeckPlugin` with Stream Deck. Remove the old **Monitor Control** plugin so it cannot remain another hardware writer, then re-add actions; old UUIDs/settings are not aliased or automatically migrated. For source link/watch commands, see [CONTRIBUTE.md](CONTRIBUTE.md#stream-deck-from-source).
 
-Add **Synapsed → Characteristic**, then explicitly choose device/characteristic in the dynamic inspector. Unbound displays Configure; removed/inapplicable bindings send nothing. Keys default to step +1, boolean toggle or action invoke where metadata allows; configure step -1 for decrease. Dial rotation sends signed ticks. For MoonHalo, bind a brightness/color-temperature/light-mode primary and an optional `moonhalo.power` press binding with toggle. Dials show metadata-derived min/current/max/bar; read-only/string/action values do not invent numeric ranges.
+Add **Synapsed → Key** or **Synapsed → Dial**, then explicitly choose device/characteristic in the dynamic inspector. Unbound displays Configure; removed/inapplicable bindings send nothing. Keys default to step +1, boolean toggle or action invoke where metadata allows; configure step -1 for decrease. Read-only characteristics can be bound to keys as display-only. Dial rotation sends signed ticks. For MoonHalo, bind a brightness/color-temperature/light-mode primary and an optional same-device `moonhalo.power` press characteristic with toggle. Dials show metadata-derived min/current/max/bar; read-only/string/action values do not invent numeric ranges.
 
 ### macOS menu bar
 
@@ -141,20 +146,24 @@ On Omarchy, install the widget with `deploy/systemd/install.sh` (or install it s
 
 Omarchy's built-in Display widget and brightness keys write the same monitor through `ddcutil`. Do not use them while Synapsed is controlling that display; there must be only one hardware writer.
 
-## Monitor behavior and hardware safety
+## Driver behavior and hardware safety
 
 `generic-ddc` alone discovers standard VCP `0x10` brightness and performs no vendor probing. Installing `benq-rd280u` plus its dependency opts into RD280U name/fingerprint checks and explicit specialized ownership; Display Pilot 2 installation is not required. Disable/remove BenQ and restart to retain generic Lua brightness, not a Rust fallback.
 
 BenQ Low Blue Light `0x19` and MoonHalo packed registers `0xD7`/`0xD9` are model-specific. Color temperature is a device level, not Kelvin. Identity-less/changed specialized reconnection is refused until restart; generic slot rebinding is explicit. See [verified packed fields and limits](docs/hardware/benq-rd280u.md).
 
+`ikea-idasen` is opt-in. It publishes height with Set/Step and a Stop action. If multiple desks match, set `[plugins.settings.ikea-idasen] name` to the exact advertised product name; ambiguous matches remain refused. Movement repeats are bounded to 45 seconds and use STOP/ABORT final writes. The owner and integration tests use fake GATT; physical desk protocol, firmware response, platform BLE access and stop behavior are unverified.
+
 macOS uses private IOKit `IOAVService`; OS changes can break it. Optional target-bound EDID acquisition is not guaranteed by symbol/header availability. Missing identity does not break generic brightness. Linux uses a separate real `i2c-dev` backend; physical Linux DDC and Intel macOS/Windows are not promised by a macOS build.
 
-**Do not perform real writes without exact prior-state capture and reliable finally/trap restoration of brightness, eye-care and packed-register flags.** Hardware-free Lua/native-owner fixtures and browser/CLI observations do not prove physical monitor behavior, external OSD detection or complete native-client interactions. No physical writes are required for normal tests.
+**Do not perform physical monitor writes without exact prior-state capture and reliable finally/trap restoration of brightness, eye-care and packed-register flags.** Hardware-free Lua/native-owner fixtures and browser/CLI observations do not prove physical monitor behavior, external OSD detection or complete native-client interactions. No physical writes are required for normal tests.
 
 Local hardware-free verification exercises real Lua transport-backed callbacks, the daemon/CLI/WebSocket restart path, embedded web, Stream Deck dynamic inspector binding/typed command saving, and Raycast number/string/boolean forms. The native tray retains an Online menu-bar item without a window. Full tray menu tracking through a hidden-menu-bar proxy, physical Stream Deck key/dial input, OSD synchronization and Linux hardware execution remain separate verification requirements.
 
+Bluetooth-owner and IDÅSEN integration tests use fake GATT and do not establish physical desk behavior or Bluetooth runtime access on macOS/Linux.
+
 ## Further reading
 
-[CONTRIBUTE.md](CONTRIBUTE.md) covers architecture, toolchains, tests and complete source workflows for every component. [Repository boundaries](docs/specs/0000-repository.md) distinguish delivered support from reserved future BLE/security-device, authenticated network/discovery and Home Assistant work.
+[CONTRIBUTE.md](CONTRIBUTE.md) covers architecture, toolchains, tests and complete source workflows for every component. [Repository boundaries](docs/specs/0000-repository.md) distinguish delivered support from reserved security-device, authenticated network/discovery and Home Assistant work.
 
 Project licensing is MIT OR Apache-2.0; see `THIRD-PARTY-NOTICES.txt` for vendor notices.

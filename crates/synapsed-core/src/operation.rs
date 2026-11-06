@@ -9,7 +9,6 @@ use std::{
     time::Instant,
 };
 use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard};
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 /// Identifier and generation assigned to a native endpoint.
@@ -18,6 +17,30 @@ pub struct EndpointToken {
     pub id: u64,
     /// Generation distinguishing the endpoint's current presence and identity.
     pub generation: u64,
+}
+
+static ENDPOINT_IDS: AtomicU64 = AtomicU64::new(1);
+
+/// Allocate an endpoint identifier unique across native transport owners in this process.
+pub fn allocate_endpoint_id() -> u64 {
+    ENDPOINT_IDS.fetch_add(1, Ordering::Relaxed)
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+/// Public metadata for a transport endpoint.
+pub struct EndpointDescriptor {
+    /// Token used to authorize operations on this endpoint generation.
+    pub token: EndpointToken,
+    /// Capability identifier advertised for this endpoint.
+    pub capability: String,
+    /// Three-letter manufacturer code when valid EDID data is available.
+    pub manufacturer: Option<String>,
+    /// Manufacturer-specific product code when available.
+    pub product: Option<u16>,
+    /// Product name decoded from valid base EDID data, when available.
+    pub product_name: Option<String>,
+    /// Opaque stable identity derived from validated base EDID data.
+    pub identity: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -222,6 +245,16 @@ impl DeviceGrant {
 }
 
 #[derive(Clone)]
+/// Liveness of the ownership grant associated with an operation.
+pub struct GrantLiveness(Arc<AtomicBool>);
+impl GrantLiveness {
+    /// Returns whether the associated ownership grant remains active.
+    pub fn is_active(&self) -> bool {
+        self.0.load(Ordering::SeqCst)
+    }
+}
+
+#[derive(Clone)]
 /// Authorization and lifecycle context shared by callbacks and native DDC work.
 pub struct OperationContext {
     inner: Arc<Operation>,
@@ -337,6 +370,10 @@ impl OperationContext {
     pub fn state(&self) -> OperationState {
         OperationState::from_u8(self.inner.state.load(Ordering::SeqCst))
     }
+    /// Return a handle that observes whether this operation's ownership grant remains active.
+    pub fn grant_liveness(&self) -> GrantLiveness {
+        GrantLiveness(self.inner.active.clone())
+    }
     /// Check endpoint, register, deadline, and read/write authorization.
     pub fn validate(
         &self,
@@ -344,6 +381,19 @@ impl OperationContext {
         code: u8,
         write: bool,
     ) -> Result<(), DriverError> {
+        self.validate_endpoint(endpoint)?;
+        if !self.inner.reads.contains(&code)
+            || (write && (!self.write_allowed || !self.inner.writes.contains_key(&code)))
+        {
+            return Err(DriverError::new(
+                ErrorCode::PermissionDenied,
+                "Native register operation is not granted.",
+            ));
+        }
+        Ok(())
+    }
+    /// Check endpoint membership, grant activity, deadline, and operation lifecycle.
+    pub fn validate_endpoint(&self, endpoint: EndpointToken) -> Result<(), DriverError> {
         if !self.inner.active.load(Ordering::SeqCst) || !self.inner.endpoints.contains(&endpoint) {
             return Err(unavailable());
         }
@@ -358,14 +408,6 @@ impl OperationContext {
             )
         {
             return Err(timeout());
-        }
-        if !self.inner.reads.contains(&code)
-            || (write && (!self.write_allowed || !self.inner.writes.contains_key(&code)))
-        {
-            return Err(DriverError::new(
-                ErrorCode::PermissionDenied,
-                "Native register operation is not granted.",
-            ));
         }
         Ok(())
     }

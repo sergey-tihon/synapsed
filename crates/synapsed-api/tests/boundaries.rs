@@ -578,6 +578,7 @@ fn log_ring_and_error_status_mappings_are_complete() {
         (ErrorCode::PermissionDenied, 503),
         (ErrorCode::DeviceUnavailable, 503),
         (ErrorCode::DdcError, 503),
+        (ErrorCode::BluetoothError, 503),
         (ErrorCode::PluginError, 503),
         (ErrorCode::UnsupportedCapability, 503),
         (ErrorCode::Busy, 503),

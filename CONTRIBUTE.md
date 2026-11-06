@@ -4,11 +4,11 @@
 
 Synapsed has one Rust user daemon, external trusted Lua drivers and metadata-driven local clients. Rust owns native transports, endpoint leases and lifecycle; Lua declares devices/characteristics and implements hardware policy. Clients use the generated device-neutral HTTP/WebSocket contract and never acquire hardware. The separate `synapsed-inventory` crate passively collects OS hardware records and derives a privacy-bounded topology; the daemon merges it with its existing DDC scan cache and driver bindings. New drivers using existing capabilities deploy without a host/client rebuild; new transports require a Rust capability implementation.
 
-See the [repository ownership/dependency map](docs/specs/0000-repository.md), [Lua contract](docs/specs/0001-lua-device-plugins.md), [client contract](docs/specs/0002-local-clients.md), [ADRs](docs/adr/) and [BenQ evidence/limits](docs/hardware/benq-rd280u.md). Reserved BLE, security-device, system-metric, agent, network and Home Assistant areas are not delivered integrations.
+See the [repository ownership/dependency map](docs/specs/0000-repository.md), [Lua contract](docs/specs/0001-lua-device-plugins.md), [client contract](docs/specs/0002-local-clients.md), [ADRs](docs/adr/) and [BenQ evidence/limits](docs/hardware/benq-rd280u.md). Security-device, system-metric, agent, network and Home Assistant areas remain reserved; the opt-in IKEA IDÅSEN Bluetooth driver is shipped.
 
 ## Toolchain and repository commands
 
-Use Node.js 24+, npm and Rust 1.90+. Keep the canonical root `package-lock.json` and `Cargo.lock`; do not add nested dependency locks. Supported native build hosts are Apple Silicon macOS and Linux x86_64. macOS needs the Apple SDK/Xcode Command Line Tools; the build selector sets `MACOSX_DEPLOYMENT_TARGET=12.0`. The macOS-only tray is excluded from Linux Cargo test selection. Raycast's current app requires Apple Silicon/macOS Tahoe and a signed-in account; its host runtime is separate from developer Node.
+Use Node.js 24+, npm and Rust 1.90+. Keep the canonical root `package-lock.json` and `Cargo.lock`; do not add nested dependency locks. Supported native build hosts are Apple Silicon macOS and Linux x86_64. macOS needs the Apple SDK/Xcode Command Line Tools; the build selector sets `MACOSX_DEPLOYMENT_TARGET=12.0`. Linux native Bluetooth builds also need `pkg-config` and `libdbus-1` development files (Debian/Ubuntu: `pkg-config libdbus-1-dev`). The macOS-only tray is excluded from Linux Cargo test selection. Raycast's current app requires Apple Silicon/macOS Tahoe and a signed-in account; its host runtime is separate from developer Node.
 
 From the repository root:
 
@@ -112,7 +112,7 @@ npm run validate
 npm run pack:plugin
 ```
 
-The bundle is `apps/streamdeck/com.sergey-tihon.synapsed.sdPlugin`. Add Synapsed → Characteristic and explicitly bind declared IDs in the dynamic inspector; no unbound first-monitor default exists. Primary rotation uses signed ticks and metadata-supported steps. Optional secondary press bindings support, for example, `moonhalo.power` toggle. Inspector catalogs flow through the plugin's shared daemon client, not another socket or hardware access. Keep action handlers, manifest controllers/encoder, layout visibility and typed inspector settings aligned. SDPI v4.0.1 is not published on npm: [official setup](https://sdpi-components.dev/docs/getting-started/get-started) distributes a local JS download. Keep the exact committed file for reproducible offline bundles, preserving licensing and actual datasource/hot-reload APIs.
+The bundle is `apps/streamdeck/com.sergey-tihon.synapsed.sdPlugin`. Add Synapsed → Key or Synapsed → Dial and explicitly bind declared IDs in the dynamic inspector; no unbound first-monitor default exists. Primary rotation uses signed ticks and metadata-supported steps. Optional same-device Dial press bindings support, for example, `moonhalo.power` toggle. Inspector catalogs flow through the plugin's shared daemon client, not another socket or hardware access. Keep action handlers, manifest controllers/encoder, layout visibility and typed inspector settings aligned. SDPI v4.0.1 is not published on npm: [official setup](https://sdpi-components.dev/docs/getting-started/get-started) distributes a local JS download. Keep the exact committed file for reproducible offline bundles, preserving licensing and actual datasource/hot-reload APIs.
 
 ## macOS tray from source
 
@@ -159,7 +159,7 @@ Use the Linux user installer to install daemon binaries, drivers, the service te
 
 ## Packaging and release notes
 
-`npm run build` selects current-host components; `npm run pack` creates current-host archives and SHA-256 checksums under `dist/`. Linux daemon archives include binaries, complete external driver folders, the `omarchy/` widget, deployment templates/examples, docs and both license texts. macOS adds Stream Deck, tray and Raycast artifacts. Use `deploy/systemd/install.sh` to install Linux archives as a non-root desktop user; it leaves the service stopped and never changes device permissions. Follow the [README installation/service instructions](README.md) to deploy explicitly; builds do not enable services or copy drivers into your home directory.
+`npm run build` selects current-host components; `npm run pack` creates current-host archives and SHA-256 checksums under `dist/`. Linux daemon archives include binaries, complete external driver folders (including the opt-in IKEA IDÅSEN Bluetooth package), the `omarchy/` widget, deployment templates/examples, docs and both license texts. macOS adds Stream Deck, tray and Raycast artifacts. Use `deploy/systemd/install.sh` to install Linux archives as a non-root desktop user; `--idasen` opts into the Bluetooth desk driver. The installer leaves the service stopped and never changes device permissions. Follow the [README installation/service instructions](README.md) to deploy explicitly; builds do not enable services or copy drivers into your home directory.
 
 Stream Deck packaging runs the SDK against a staged bundle without logs. The SDK may rewrite that staged manifest; the formatted source manifest remains unchanged.
 
@@ -169,4 +169,6 @@ Rust/npm/app `0.1.0` maps to Stream Deck manifest/tag `0.1.0.0`. Release publica
 
 Distinguish hardware-free tests, no-device process smoke, native UI interaction and physical hardware proof. Hosted native builds/smoke do not establish monitor behavior. macOS DDC uses private IOKit APIs; optional target-bound EDID/minimum-OS acquisition has separate verification limits. Linux permissions follow distro `i2c-dev` policy, never forced access, auto-sudo or world-writable workarounds.
 
-Do not perform physical writes without exact prior-state capture and reliable finally/trap restoration of brightness, eye-care and both packed-register flags. Do not use physical writes in ordinary tests. Report only exercised checks; fixtures do not prove external OSD synchronization, physical Stream Deck controls or full tray/Raycast interactions. Installed Lua is trusted local code: guards/quarantine do not guarantee hostile-code termination, and loopback policy is not OS-user authentication.
+The optional IKEA IDÅSEN Bluetooth driver has only fake-backend integration evidence; no physical desk, firmware stop behavior, macOS authorization prompt or Linux BlueZ runtime has been verified.
+
+For monitors, do not perform physical writes without exact prior-state capture and reliable finally/trap restoration of brightness, eye-care and both packed-register flags. Do not use physical writes in ordinary tests. Report only exercised checks; fixtures do not prove external OSD synchronization, physical Stream Deck controls or full tray/Raycast interactions. Installed Lua is trusted local code: guards/quarantine do not guarantee hostile-code termination, and loopback policy is not OS-user authentication.

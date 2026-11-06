@@ -30,6 +30,7 @@ use url::{Host, Url};
 
 pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
+const DRIVER_RESTART_TIMEOUT: Duration = Duration::from_secs(65);
 const SOCKET_IDLE_TIMEOUT: Duration = Duration::from_secs(65);
 type Socket = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
@@ -448,6 +449,16 @@ impl Client {
             ]))
             .header(reqwest::header::CONTENT_TYPE, "application/json")
             .body(bytes);
+        let (generation, snapshot) = self.request::<Snapshot>(request).await?;
+        self.reconcile(generation, snapshot)
+    }
+    /// Restart a startup-loaded driver runtime and reconcile its authoritative snapshot.
+    pub async fn restart_driver(&self, driver: &str) -> Result<Arc<Snapshot>, ClientError> {
+        let request = self
+            .inner
+            .http
+            .post(self.route(&["api", "v1", "drivers", driver, "restart"]))
+            .timeout(DRIVER_RESTART_TIMEOUT);
         let (generation, snapshot) = self.request::<Snapshot>(request).await?;
         self.reconcile(generation, snapshot)
     }

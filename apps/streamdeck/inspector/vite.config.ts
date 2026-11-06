@@ -1,21 +1,17 @@
-import solid from "@solidjs/vite-plugin";
 import { defineConfig } from "vite";
+import solid from "@solidjs/vite-plugin";
 
 export default defineConfig({
   root: "inspector",
-  base: "./",
   plugins: [solid()],
+  base: "./",
   build: {
     outDir: "../com.sergey-tihon.synapsed.sdPlugin/bin/inspector",
     emptyOutDir: true,
-    cssCodeSplit: false,
-    modulePreload: false,
     rollupOptions: {
       output: {
-        format: "iife",
-        inlineDynamicImports: true,
         entryFileNames: "inspector.js",
-        assetFileNames: "assets/[name][extname]",
+        assetFileNames: (asset) => (asset.name?.endsWith(".css") ? "assets/style.css" : "assets/[name][extname]"),
       },
     },
   },

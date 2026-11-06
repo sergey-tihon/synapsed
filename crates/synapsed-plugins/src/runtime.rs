@@ -1,5 +1,5 @@
 use crate::{
-    capabilities::ddc::Endpoint,
+    capabilities::endpoint::Endpoint,
     loader::{Package, module_source},
     manifest::invalid,
     registry::{CapabilityEventStream, CapabilityRegistry},
@@ -23,15 +23,16 @@ use synapsed_api::{
     Characteristic, CharacteristicAccess, CharacteristicCommand, CharacteristicGroup,
     CharacteristicSpec, CharacteristicStatus, CharacteristicValue, Device, DeviceStatus,
 };
+use synapsed_core::EndpointDescriptor;
 use synapsed_core::{
     DeviceGrant, DriverError, EndpointToken, ErrorCode, OperationContext, StateStore,
 };
-use synapsed_ddc::EndpointDescriptor;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, watch};
 type CharacteristicWrites = BTreeMap<String, BTreeMap<u8, u16>>;
 type ParsedCharacteristics = (Vec<Characteristic>, CharacteristicWrites);
 
 pub(crate) const CALLBACK_LIMIT: Duration = Duration::from_secs(5);
+pub(crate) const DRIVER_RESTART_LIMIT: Duration = Duration::from_secs(60);
 pub(crate) fn exposed_error(error: &DriverError) -> DriverError {
     DriverError::new(error.code, StateStore::FAULT_MESSAGE)
 }
@@ -315,6 +316,7 @@ struct Active {
 pub(crate) struct RuntimeHandle {
     pub sender: mpsc::Sender<RuntimeCommand>,
     pub ready: Option<oneshot::Receiver<Result<(), Failure>>>,
+    pub finished: watch::Receiver<Option<bool>>,
 }
 pub(crate) enum RuntimeCommand {
     Discover {
@@ -383,24 +385,40 @@ pub(crate) fn start(
 ) -> Result<RuntimeHandle, DriverError> {
     let (sender, receiver) = mpsc::channel(64);
     let (ready, readiness) = oneshot::channel();
+    let (finished, exited) = watch::channel(None);
+    let shutdown_clean = Arc::new(AtomicBool::new(false));
     let owner = package.manifest.id.clone();
     std::thread::Builder::new()
         .name(format!("lua-{owner}"))
         .spawn(move || {
-            let runner = tokio::runtime::Builder::new_current_thread()
+            match tokio::runtime::Builder::new_current_thread()
                 .enable_time()
-                .build();
-            let Ok(runner) = runner else {
-                let _ = ready.send(Err(Failure::fatal(DriverError::new(
-                    ErrorCode::PluginError,
-                    "Lua executor initialization failed.",
-                ))));
-                return;
-            };
-            let local = tokio::task::LocalSet::new();
-            runner.block_on(local.run_until(run_vm(
-                package, packages, registry, settings, events, accepting, receiver, ready, owner,
-            )));
+                .build()
+            {
+                Ok(runner) => {
+                    let local = tokio::task::LocalSet::new();
+                    runner.block_on(local.run_until(run_vm(
+                        package,
+                        packages,
+                        registry,
+                        settings,
+                        events,
+                        accepting,
+                        receiver,
+                        ready,
+                        owner,
+                        shutdown_clean.clone(),
+                    )));
+                }
+                Err(_) => {
+                    let _ = ready.send(Err(Failure::fatal(DriverError::new(
+                        ErrorCode::PluginError,
+                        "Lua executor initialization failed.",
+                    ))));
+                    shutdown_clean.store(true, Ordering::SeqCst);
+                }
+            }
+            finished.send_replace(Some(shutdown_clean.load(Ordering::SeqCst)));
         })
         .map_err(|_| {
             DriverError::new(
@@ -411,6 +429,7 @@ pub(crate) fn start(
     Ok(RuntimeHandle {
         sender,
         ready: Some(readiness),
+        finished: exited,
     })
 }
 #[allow(clippy::too_many_arguments)]
@@ -424,6 +443,7 @@ async fn run_vm(
     mut receiver: mpsc::Receiver<RuntimeCommand>,
     ready: oneshot::Sender<Result<(), Failure>>,
     owner: String,
+    shutdown_clean: Arc<AtomicBool>,
 ) {
     let mut vm = match Vm::initialize(package, packages, registry, settings).await {
         Ok(vm) => {
@@ -438,6 +458,7 @@ async fn run_vm(
                         let _ = reply.send(Err(failure.clone()));
                     }
                     RuntimeCommand::Shutdown { reply, .. } => {
+                        shutdown_clean.store(true, Ordering::SeqCst);
                         let _ = reply.send(Ok(()));
                         break;
                     }
@@ -545,6 +566,7 @@ async fn run_vm(
             }
             RuntimeCommand::Shutdown { deadline, reply } => {
                 let result = vm.shutdown(deadline).await;
+                shutdown_clean.store(result.is_ok(), Ordering::SeqCst);
                 let _ = reply.send(result);
                 break;
             }
@@ -1349,15 +1371,9 @@ impl Vm {
             }
         };
         let guard = InvocationGuard::new(operation.deadline());
-        let exchanged = self
-            .lua
-            .to_value(&event)
-            .map_err(Failure::from)
-            .and_then(json)
-            .and_then(|event| {
-                synapsed_api::validate_encoded_size(&event, 16 * 1024)?;
-                Ok(event)
-            });
+        let exchanged = synapsed_api::validate_encoded_size(&event, 16 * 1024)
+            .map(|_| event)
+            .map_err(Failure::from);
         let result = match exchanged {
             Ok(event) => self
                 .callback_with_guard(&id, callback, &operation, CallbackKind::Event(event), guard)

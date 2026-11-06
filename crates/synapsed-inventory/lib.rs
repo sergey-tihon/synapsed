@@ -9,7 +9,7 @@ pub mod linux;
 pub mod macos;
 
 pub use model::{
-    Bus, DeviceBinding, DriverCatalogEntry, InventoryMatch, InventoryRole, RawRecord,
-    SourceCollection,
+    BoundEndpoint, Bus, DeviceBinding, DriverCatalogEntry, InventoryMatch, InventoryRole,
+    RawRecord, SourceCollection, bluetooth_display_name, bluetooth_endpoint_identity,
 };
 pub use topology::{build, build_with_sources};

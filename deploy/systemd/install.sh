@@ -2,14 +2,16 @@
 set -eu
 
 usage() {
-  printf '%s\n' 'Usage: install.sh [--generic-only] [--no-omarchy]' >&2
+  printf '%s\n' 'Usage: install.sh [--generic-only] [--idasen] [--no-omarchy]' >&2
 }
 
 generic_only=0
+idasen=0
 no_omarchy=0
 for argument in "$@"; do
   case "$argument" in
     --generic-only) generic_only=1 ;;
+    --idasen) idasen=1 ;;
     --no-omarchy) no_omarchy=1 ;;
     *) usage; exit 2 ;;
   esac
@@ -69,6 +71,9 @@ install_driver() {
 install_driver generic-ddc
 if [ "$generic_only" -eq 0 ]; then
   install_driver benq-rd280u
+fi
+if [ "$idasen" -eq 1 ]; then
+  install_driver ikea-idasen
 fi
 
 if [ -e "$config" ]; then

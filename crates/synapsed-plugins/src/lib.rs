@@ -4,17 +4,18 @@ mod manifest;
 mod registry;
 mod runtime;
 pub mod capabilities {
+    pub mod bluetooth;
     pub mod ddc;
+    pub(crate) mod endpoint;
 }
 pub use registry::{CapabilityEventStream, CapabilityRegistry, LuaCapabilityFactory};
 pub use runtime::{InvocationContext, InvocationGuard};
-pub use synapsed_ddc::EndpointDescriptor;
 pub use synapsed_inventory::{DriverCatalogEntry, InventoryMatch, InventoryRole};
 
 use loader::{Catalog, Package};
 use runtime::{
-    CALLBACK_LIMIT, Candidate, Failure, InvocationGuard as Guard, RuntimeCommand, RuntimeEvent,
-    RuntimeHandle, exposed_error, unavailable,
+    CALLBACK_LIMIT, Candidate, DRIVER_RESTART_LIMIT, Failure, InvocationGuard as Guard,
+    RuntimeCommand, RuntimeEvent, RuntimeHandle, exposed_error, unavailable,
 };
 use serde_json::Value;
 use std::{
@@ -30,7 +31,8 @@ use synapsed_api::{
     API_VERSION, CharacteristicCommand, Device, DeviceStatus, DriverState, DriverStatus, Snapshot,
 };
 use synapsed_core::{
-    DeviceGrant, DriverError, EndpointGates, EndpointToken, ErrorCode, OperationContext, StateStore,
+    DeviceGrant, DriverError, EndpointDescriptor, EndpointGates, EndpointToken, ErrorCode,
+    OperationContext, StateStore,
 };
 use tokio::sync::{Mutex as AsyncMutex, OnceCell, mpsc, oneshot, watch};
 
@@ -112,7 +114,7 @@ pub struct PluginHost {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Binding {
     pub driver: String,
-    pub endpoints: Vec<EndpointToken>,
+    pub endpoints: Vec<EndpointDescriptor>,
 }
 pub type Bindings = BTreeMap<String, Binding>;
 fn coordinator_initialization_error() -> DriverError {
@@ -130,6 +132,7 @@ struct HostInner {
     bindings: watch::Sender<Arc<Bindings>>,
     readiness: AsyncMutex<Option<oneshot::Receiver<Result<(), DriverError>>>>,
     startup: OnceCell<Result<(), DriverError>>,
+    restarting: Arc<AtomicBool>,
 }
 impl HostInner {
     async fn await_ready(&self) -> Result<(), DriverError> {
@@ -196,6 +199,12 @@ impl Drop for CurrentOperation {
         }
     }
 }
+struct RestartGuard(Arc<AtomicBool>);
+impl Drop for RestartGuard {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::SeqCst);
+    }
+}
 enum HostCommand {
     Dispatch {
         device: String,
@@ -204,6 +213,12 @@ enum HostCommand {
         deadline: Instant,
         cancellation: Arc<Cancellation>,
         reply: oneshot::Sender<Result<Arc<Snapshot>, DriverError>>,
+    },
+    RestartDriver {
+        driver: String,
+        deadline: Instant,
+        reply: oneshot::Sender<Result<(), DriverError>>,
+        guard: RestartGuard,
     },
     #[cfg(debug_assertions)]
     DiscoveryRound { reply: oneshot::Sender<u64> },
@@ -257,7 +272,11 @@ fn catalog_entries(catalog: &Catalog) -> Arc<[DriverCatalogEntry]> {
             DriverCatalogEntry {
                 id: package.manifest.id.clone(),
                 version: package.manifest.version.clone(),
-                supersedes: package.manifest.supersedes.clone(),
+                generic: package
+                    .manifest
+                    .inventory
+                    .as_ref()
+                    .is_some_and(|inventory| inventory.generic),
                 inventory_matches,
             }
         })
@@ -327,6 +346,7 @@ impl PluginHost {
         let (ready, readiness) = oneshot::channel();
         let worker_store = store.clone();
         let accepting = Arc::new(AtomicBool::new(true));
+        let restarting = Arc::new(AtomicBool::new(false));
         let current = Arc::new(Mutex::new(None));
         let worker_accepting = accepting.clone();
         let worker_current = current.clone();
@@ -377,6 +397,7 @@ impl PluginHost {
             inner: Arc::new(HostInner {
                 commands,
                 accepting,
+                restarting,
                 current,
                 store,
                 catalog: public_catalog,
@@ -435,6 +456,41 @@ impl PluginHost {
             .map_err(|_| unavailable_error())?;
         abandonment.armed = false;
         response
+    }
+    /// Restart a loaded driver and its dependency-connected drivers from startup-frozen source/settings.
+    pub async fn restart_driver(&self, driver: &str) -> Result<Arc<Snapshot>, DriverError> {
+        self.inner.await_ready().await?;
+        if !self.inner.accepting.load(Ordering::SeqCst) {
+            return Err(unavailable_error());
+        }
+        if self
+            .inner
+            .restarting
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+        {
+            return Err(busy());
+        }
+        let guard = RestartGuard(self.inner.restarting.clone());
+        let deadline = Instant::now() + DRIVER_RESTART_LIMIT;
+        let (reply, receiver) = oneshot::channel();
+        self.inner
+            .commands
+            .try_send(HostCommand::RestartDriver {
+                driver: driver.to_owned(),
+                deadline,
+                reply,
+                guard,
+            })
+            .map_err(|error| match error {
+                mpsc::error::TrySendError::Full(_) => busy(),
+                mpsc::error::TrySendError::Closed(_) => unavailable_error(),
+            })?;
+        tokio::time::timeout(DRIVER_RESTART_LIMIT + Duration::from_secs(1), receiver)
+            .await
+            .map_err(|_| restart_timeout_error())?
+            .map_err(|_| unavailable_error())??;
+        Ok(self.inner.store.snapshot())
     }
     #[cfg(debug_assertions)]
     #[doc(hidden)]
@@ -508,6 +564,7 @@ struct Coordinator {
     candidates: BTreeMap<String, Vec<Candidate>>,
     failed: BTreeMap<String, DriverError>,
     quarantined: BTreeSet<String>,
+    restart_blocked: BTreeSet<String>,
     routes: BTreeMap<String, Route>,
     history: BTreeMap<(String, String), History>,
     gates: EndpointGates,
@@ -517,6 +574,9 @@ struct Coordinator {
     dominance: BTreeMap<String, BTreeSet<String>>,
     current: Arc<Mutex<Option<OperationContext>>>,
     binding_updates: watch::Sender<Arc<Bindings>>,
+    events: mpsc::Sender<RuntimeEvent>,
+    accepting: Arc<AtomicBool>,
+    settings: BTreeMap<String, Value>,
     #[cfg(debug_assertions)]
     discovery_round: u64,
 }
@@ -557,6 +617,7 @@ impl Coordinator {
             candidates: BTreeMap::new(),
             failed: BTreeMap::new(),
             quarantined: BTreeSet::new(),
+            restart_blocked: BTreeSet::new(),
             routes: BTreeMap::new(),
             history: BTreeMap::new(),
             gates: EndpointGates::default(),
@@ -566,6 +627,9 @@ impl Coordinator {
             dominance,
             current,
             binding_updates,
+            events: events.clone(),
+            accepting: accepting.clone(),
+            settings: config.settings.clone(),
             #[cfg(debug_assertions)]
             discovery_round: 0,
         };
@@ -644,6 +708,14 @@ impl Coordinator {
                         }
                         let _ = reply.send(host.record_discovery_round());
                     }
+                    Some(HostCommand::RestartDriver { driver, deadline, reply, guard }) => {
+                        let result = host.restart_driver(&driver, deadline).await;
+                        while let Ok(event) = observed.try_recv() {
+                            host.observation(event).await;
+                        }
+                        let _ = reply.send(result);
+                        drop(guard);
+                    }
                     Some(HostCommand::Shutdown { deadline, reply }) => {
                         let result = host.stop(deadline).await;
                         let _ = reply.send(result);
@@ -672,11 +744,185 @@ impl Coordinator {
         self.discovery_round = self.discovery_round.saturating_add(1);
         self.discovery_round
     }
+    fn dependency_component(&self, driver: &str) -> BTreeSet<String> {
+        let mut affected = BTreeSet::from([driver.to_owned()]);
+        loop {
+            let before = affected.len();
+            for (id, package) in &self.packages {
+                if affected.contains(id) {
+                    affected.extend(
+                        package
+                            .manifest
+                            .dependencies
+                            .iter()
+                            .filter(|dependency| self.packages.contains_key(*dependency))
+                            .cloned(),
+                    );
+                } else if package
+                    .manifest
+                    .dependencies
+                    .iter()
+                    .any(|dependency| affected.contains(dependency))
+                {
+                    affected.insert(id.clone());
+                }
+            }
+            if affected.len() == before {
+                return affected;
+            }
+        }
+    }
+    async fn restart_driver(&mut self, driver: &str, deadline: Instant) -> Result<(), DriverError> {
+        if deadline <= Instant::now() {
+            return Err(restart_timeout_error());
+        }
+        if !self.statuses.contains_key(driver) {
+            return Err(unknown_driver_error());
+        }
+        if !self.packages.contains_key(driver) {
+            return Err(unsupported_restart_error());
+        }
+        let affected = self.dependency_component(driver);
+        if affected.iter().any(|id| self.restart_blocked.contains(id)) {
+            return Err(restart_shutdown_error());
+        }
+        let routes = self
+            .routes
+            .iter()
+            .filter(|(_, route)| affected.contains(&route.owner))
+            .map(|(id, _)| id.clone())
+            .collect::<Vec<_>>();
+        for id in routes {
+            if let Err(error) = self.retire(&id, deadline).await {
+                self.fail_restart(&affected, driver, &error);
+                return Err(error);
+            }
+        }
+        for id in &affected {
+            if let Some(runtime) = self.runtimes.get_mut(id)
+                && let Err(error) = stop_runtime(runtime, deadline).await
+            {
+                self.fail_restart(&affected, driver, &error);
+                return Err(error);
+            }
+        }
+        for id in &affected {
+            self.runtimes.remove(id);
+            self.candidates.remove(id);
+            self.failed.remove(id);
+            self.quarantined.remove(id);
+            self.reports.insert(id.clone(), Vec::new());
+            let status = self.status_mut(id);
+            status.state = DriverState::Disconnected;
+            status.error = None;
+        }
+        for id in &affected {
+            let package = self.packages[id].clone();
+            let settings = self
+                .settings
+                .get(id)
+                .cloned()
+                .unwrap_or_else(|| Value::Object(Default::default()));
+            match runtime::start(
+                package,
+                self.packages.clone(),
+                self.registry.clone(),
+                settings,
+                self.events.clone(),
+                self.accepting.clone(),
+            ) {
+                Ok(runtime) => {
+                    self.runtimes.insert(id.clone(), runtime);
+                }
+                Err(error) => self.quarantine(id, &error).await,
+            }
+        }
+        let initializations = self
+            .runtimes
+            .iter_mut()
+            .filter(|(id, _)| affected.contains(*id))
+            .filter_map(|(id, runtime)| {
+                let receiver = runtime.ready.take()?;
+                let id = id.clone();
+                Some(async move {
+                    (
+                        id,
+                        match tokio::time::timeout(CALLBACK_LIMIT, receiver).await {
+                            Ok(Ok(result)) => result,
+                            _ => Err(Failure::fatal(timeout_error())),
+                        },
+                    )
+                })
+            })
+            .collect::<Vec<_>>();
+        for (id, result) in futures_util::future::join_all(initializations).await {
+            if let Err(failure) = result {
+                self.quarantine(&id, &failure.error).await;
+            }
+        }
+        self.discover_selected(Some(&affected)).await;
+        let status = self.statuses.get(driver).expect("loaded driver status");
+        if status.state != DriverState::Online {
+            return Err(status.error.clone().unwrap_or_else(|| {
+                DriverError::new(
+                    ErrorCode::PluginError,
+                    "Driver restart completed, but the driver did not return online.",
+                )
+            }));
+        }
+        Ok(())
+    }
+    fn fail_restart(&mut self, affected: &BTreeSet<String>, requested: &str, error: &DriverError) {
+        self.restart_blocked.extend(affected.iter().cloned());
+        for id in affected {
+            let failure = if id == requested {
+                error.clone()
+            } else {
+                DriverError::new(
+                    ErrorCode::PluginError,
+                    "A related driver could not be restarted safely.",
+                )
+            };
+            self.quarantined.insert(id.clone());
+            self.failed.insert(id.clone(), failure.clone());
+            let status = self.status_mut(id);
+            status.state = if id == requested {
+                DriverState::Error
+            } else {
+                DriverState::Disabled
+            };
+            status.error = Some(exposed_error(&failure));
+        }
+        for (id, route) in &mut self.routes {
+            if affected.contains(&route.owner) {
+                route.grant.revoke();
+                if let Some(error) = self.failed.get(&route.owner) {
+                    unavailable(&mut route.device, error);
+                    self.last
+                        .insert((route.owner.clone(), id.clone()), route.device.clone());
+                }
+            }
+        }
+        for id in affected {
+            if let (Some(error), Some(devices)) = (self.failed.get(id), self.reports.get_mut(id)) {
+                for device in devices {
+                    unavailable(device, error);
+                }
+            }
+        }
+        let _ = self.publish();
+    }
     async fn discover(&mut self) {
+        self.discover_selected(None).await;
+    }
+    async fn discover_selected(&mut self, selected: Option<&BTreeSet<String>>) {
         let requests = self
             .runtimes
             .iter()
-            .filter(|(id, _)| !self.quarantined.contains(*id))
+            .filter(|(id, _)| {
+                !self.quarantined.contains(*id)
+                    && selected.is_none_or(|selected| selected.contains(*id))
+            })
             .map(|(id, runtime)| {
                 let id = id.clone();
                 let sender = runtime.sender.clone();
@@ -1186,14 +1432,9 @@ impl Coordinator {
             .routes
             .iter()
             .map(|(device_id, route)| {
-                let mut endpoints: Vec<_> = route
-                    .candidate
-                    .endpoints
-                    .iter()
-                    .map(|endpoint| endpoint.token)
-                    .collect();
-                endpoints.sort_unstable();
-                endpoints.dedup();
+                let mut endpoints = route.candidate.endpoints.clone();
+                endpoints.sort_unstable_by_key(|endpoint| endpoint.token);
+                endpoints.dedup_by_key(|endpoint| endpoint.token);
                 (
                     device_id.clone(),
                     Binding {
@@ -1592,6 +1833,64 @@ fn timeout_error() -> DriverError {
     )
 }
 
+async fn stop_runtime(runtime: &mut RuntimeHandle, deadline: Instant) -> Result<(), DriverError> {
+    if let Some(clean) = *runtime.finished.borrow() {
+        return if clean {
+            Ok(())
+        } else {
+            Err(restart_shutdown_error())
+        };
+    }
+    let (reply, receiver) = oneshot::channel();
+    match runtime
+        .sender
+        .try_send(RuntimeCommand::Shutdown { deadline, reply })
+    {
+        Ok(()) => {}
+        Err(mpsc::error::TrySendError::Full(_)) => return Err(busy()),
+        Err(mpsc::error::TrySendError::Closed(_)) => {}
+    }
+    let mut finished = runtime.finished.clone();
+    let outcome = tokio::time::timeout(deadline.saturating_duration_since(Instant::now()), async {
+        let shutdown = receiver.await;
+        let exited = finished.wait_for(|state| state.is_some()).await;
+        (shutdown, exited)
+    })
+    .await
+    .map_err(|_| restart_timeout_error())?;
+    match outcome {
+        (Ok(Ok(())), Ok(clean)) if *clean == Some(true) => Ok(()),
+        (Ok(Err(failure)), _) => {
+            tracing::warn!(target: "synapsed::plugins", public_message = %"Driver shutdown callback failed; no replacement runtime started.", code = ?failure.error.code);
+            Err(restart_shutdown_error())
+        }
+        _ => Err(restart_shutdown_error()),
+    }
+}
+fn unknown_driver_error() -> DriverError {
+    DriverError::new(
+        ErrorCode::UnknownDriver,
+        "Driver is not installed by this daemon.",
+    )
+}
+fn unsupported_restart_error() -> DriverError {
+    DriverError::new(
+        ErrorCode::UnsupportedOperation,
+        "Driver package was not loaded at startup; restart the daemon after correcting it.",
+    )
+}
+fn restart_timeout_error() -> DriverError {
+    DriverError::new(
+        ErrorCode::Timeout,
+        "Driver did not stop safely; no replacement runtime was started.",
+    )
+}
+fn restart_shutdown_error() -> DriverError {
+    DriverError::new(
+        ErrorCode::PluginError,
+        "Driver did not shut down cleanly; no replacement runtime was started.",
+    )
+}
 #[cfg(test)]
 mod inventory_tests {
     use super::*;
@@ -1614,7 +1913,7 @@ mod inventory_tests {
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].id, "benq-rd280u");
         assert_eq!(entries[0].version, "0.1.0");
-        assert_eq!(entries[0].supersedes, vec!["generic-ddc".to_owned()]);
+        assert!(!entries[0].generic);
         assert_eq!(
             entries[0].inventory_matches,
             vec![InventoryMatch::Usb {
@@ -1637,6 +1936,7 @@ mod inventory_tests {
             id: 7,
             generation: 2,
         };
+        use synapsed_core::EndpointDescriptor;
         let endpoint = EndpointDescriptor {
             token,
             capability: "ddc".to_owned(),
@@ -1658,7 +1958,7 @@ mod inventory_tests {
         let candidate = Candidate {
             serial: 1,
             device: device.clone(),
-            endpoints: vec![endpoint],
+            endpoints: vec![endpoint.clone()],
             same_identity: false,
             poll_ms: None,
             writes: BTreeMap::new(),
@@ -1677,6 +1977,7 @@ mod inventory_tests {
             candidates: BTreeMap::new(),
             failed: BTreeMap::new(),
             quarantined: BTreeSet::new(),
+            restart_blocked: BTreeSet::new(),
             routes: BTreeMap::from([(
                 "monitor".to_owned(),
                 Route {
@@ -1695,6 +1996,9 @@ mod inventory_tests {
             dominance: BTreeMap::new(),
             current: Arc::new(Mutex::new(None)),
             binding_updates,
+            events: mpsc::channel(1).0,
+            accepting: Arc::new(AtomicBool::new(true)),
+            settings: BTreeMap::new(),
             #[cfg(debug_assertions)]
             discovery_round: 0,
         };
@@ -1702,7 +2006,7 @@ mod inventory_tests {
         let published = bindings.borrow().clone();
         assert_eq!(published.len(), 1);
         assert_eq!(published["monitor"].driver, "fixture-driver");
-        assert_eq!(published["monitor"].endpoints, vec![token]);
+        assert_eq!(published["monitor"].endpoints, vec![endpoint]);
 
         coordinator
             .retire("monitor", Instant::now() + CALLBACK_LIMIT)

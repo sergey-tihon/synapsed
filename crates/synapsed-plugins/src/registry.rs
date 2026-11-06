@@ -78,12 +78,21 @@ impl CapabilityRegistry {
         Ok(())
     }
     pub(crate) fn validate_manifest(&self, manifest: &Manifest) -> Result<(), DriverError> {
+        let mut codes = BTreeSet::new();
         for (id, version) in &manifest.capabilities {
             let factory = self.factory(id)?;
             if factory.version() != *version {
                 return Err(unsupported());
             }
             factory.validate_permissions(&manifest.permissions[id])?;
+            for code in factory.read_permissions(&manifest.permissions[id])? {
+                if !codes.insert(code) {
+                    return Err(DriverError::new(
+                        ErrorCode::PermissionDenied,
+                        "Capability permission code spaces overlap.",
+                    ));
+                }
+            }
         }
         Ok(())
     }

@@ -9,7 +9,7 @@ import {
   type ErrorCode,
   type Snapshot,
 } from "@synapsed/client";
-import type { InspectorDevice, Selection } from "./protocol.js";
+import type { InspectorDevice } from "./protocol.js";
 export type InspectorSpec =
   | {
       kind: "number";
@@ -84,15 +84,11 @@ export type Catalog = {
   devices: InspectorDevice[];
   connection: ClientStatus;
   configurationError: string | null;
-  selection: Selection;
-  primary: InspectorCharacteristic | null;
-  press: InspectorCharacteristic | null;
 };
 
 export function buildCatalog(
   snapshot: Snapshot | undefined,
   connection: ClientStatus,
-  selection: Selection,
   configurationError?: string,
 ): Catalog {
   const devices = (snapshot?.devices ?? []).map((device) => ({
@@ -104,15 +100,9 @@ export function buildCatalog(
     status: device.status,
     characteristics: device.characteristics.map((characteristic) => inspectorCharacteristic(characteristic)),
   }));
-  const findCharacteristic = (deviceId: string, characteristicId: string) =>
-    devices.find((device) => device.id === deviceId)?.characteristics.find((item) => item.id === characteristicId) ??
-    null;
   return {
     connection,
     devices,
     configurationError: configurationError ?? null,
-    selection,
-    primary: findCharacteristic(selection.deviceId, selection.characteristicId),
-    press: findCharacteristic(selection.pressDeviceId, selection.pressCharacteristicId),
   };
 }

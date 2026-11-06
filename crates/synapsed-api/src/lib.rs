@@ -60,6 +60,8 @@ pub enum ErrorCode {
     ForbiddenHost,
     /// The requested device does not exist.
     UnknownDevice,
+    /// The requested driver does not exist.
+    UnknownDriver,
     /// The requested characteristic does not exist.
     UnknownCharacteristic,
     /// The request identifies more than one device.
@@ -76,6 +78,8 @@ pub enum ErrorCode {
     DeviceUnavailable,
     /// A DDC transport operation failed.
     DdcError,
+    /// A Bluetooth transport operation failed.
+    BluetoothError,
     /// A driver plugin operation failed.
     PluginError,
     /// The requested capability is not supported.
@@ -91,12 +95,13 @@ impl ErrorCode {
         match self {
             Self::InvalidRequest => 400,
             Self::ForbiddenOrigin | Self::ForbiddenHost => 403,
-            Self::UnknownDevice | Self::UnknownCharacteristic => 404,
+            Self::UnknownDevice | Self::UnknownDriver | Self::UnknownCharacteristic => 404,
             Self::AmbiguousDevice | Self::DriverConflict => 409,
             Self::UnsupportedOperation | Self::InvalidValue => 422,
             Self::PermissionDenied
             | Self::DeviceUnavailable
             | Self::DdcError
+            | Self::BluetoothError
             | Self::PluginError
             | Self::UnsupportedCapability
             | Self::Busy => 503,

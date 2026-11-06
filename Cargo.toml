@@ -3,6 +3,7 @@ members = [
     "crates/synapsed-api",
     "crates/synapsed-core",
     "crates/synapsed-ddc",
+    "crates/synapsed-bluetooth",
     "crates/synapsed-plugins",
     "crates/synapsed-inventory",
     "crates/synapsed",

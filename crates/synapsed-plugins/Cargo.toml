@@ -12,6 +12,7 @@ workspace = true
 synapsed-api = { path = "../synapsed-api" }
 synapsed-core = { path = "../synapsed-core" }
 synapsed-ddc = { path = "../synapsed-ddc" }
+synapsed-bluetooth = { path = "../synapsed-bluetooth" }
 synapsed-inventory = { path = "../synapsed-inventory" }
 mlua = { version = "=0.12.2", features = ["lua54", "vendored", "async", "serde"] }
 tokio.workspace = true
@@ -21,7 +22,9 @@ futures-util.workspace = true
 tracing.workspace = true
 libc.workspace = true
 sha2.workspace = true
+uuid = "1"
 
 [dev-dependencies]
 synapsed-ddc = { path = "../synapsed-ddc", features = ["test-support"] }
+synapsed-bluetooth = { path = "../synapsed-bluetooth", features = ["test-support"] }
 tempfile.workspace = true

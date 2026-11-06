@@ -1,22 +1,36 @@
 import streamDeck, { type Action } from "@elgato/streamdeck";
 import {
-  defaultCommand,
   isCommandApplicable,
-  supportsStep,
   type CharacteristicCommand,
   type ClientStatus,
   type SynapsedClient,
   type Snapshot,
 } from "@synapsed/client";
 import { buildCatalog } from "./catalog.js";
-import { isSelection, selectionFromSettings, type InspectorRequest } from "./protocol.js";
-import { renderDisplay, resolveBinding } from "./render.js";
-import { settingsConform, type ActionSettings, type Binding } from "./settings.js";
-import { validateInspectorCommand } from "./inspector-command.js";
+import type { InspectorRequest } from "./protocol.js";
+import { keyEligible, pressEligible, rotateEligible } from "./eligibility.js";
+import { renderDial, renderKey, resolveBinding } from "./render.js";
+import {
+  dialSettingsConform,
+  keyBinding,
+  keySettingsConform,
+  pressBinding,
+  rotateBinding,
+  type ActionKind,
+  type ActionSettings,
+  type Binding,
+  type DialSettings,
+  type KeySettings,
+} from "./settings.js";
 
-function keyImage(settings: ActionSettings, snapshot: Snapshot | undefined, status: ClientStatus): string {
-  if (!settingsConform(settings) || !settings.binding) return "imgs/keys/configure.svg";
-  const resolved = resolveBinding(snapshot, settings.binding);
+function keyImage(
+  binding: Binding | undefined,
+  conform: boolean,
+  snapshot: Snapshot | undefined,
+  status: ClientStatus,
+): string {
+  if (!conform || !binding) return "imgs/keys/configure.svg";
+  const resolved = resolveBinding(snapshot, binding);
   if (
     status !== "connected" ||
     !resolved ||
@@ -29,22 +43,23 @@ function keyImage(settings: ActionSettings, snapshot: Snapshot | undefined, stat
     return characteristic.value === true ? "imgs/keys/boolean-on.svg" : "imgs/keys/boolean-off.svg";
   return `imgs/keys/${characteristic.spec.kind}.svg`;
 }
+
 type VisibleContext = {
   action: Action<ActionSettings>;
+  kind: ActionKind;
   settings: ActionSettings;
   active: boolean;
   version: number;
   rendering: boolean;
   controllers: Set<AbortController>;
 };
+
 type Inspector = {
   action: Action<ActionSettings>;
   active: boolean;
   appearances: number;
   sending: boolean;
   queued: boolean;
-  selection: ReturnType<typeof selectionFromSettings>;
-  requested: boolean;
 };
 
 function bindingKey(binding: Binding): string {
@@ -69,10 +84,11 @@ export class Contexts {
     this.status = client ? "disconnected" : "incompatible";
   }
 
-  appear(action: Action<ActionSettings>, settings: ActionSettings): void {
+  appear(action: Action<ActionSettings>, kind: ActionKind, settings: ActionSettings): void {
     this.retireVisible(action.id);
     const context: VisibleContext = {
       action,
+      kind,
       settings,
       active: true,
       version: 0,
@@ -107,11 +123,6 @@ export class Contexts {
       context.settings = settings;
       this.queueRender(context);
     }
-    const inspector = this.inspectors.get(id);
-    if (inspector) {
-      inspector.selection = selectionFromSettings(settings);
-      this.queueCatalog(inspector);
-    }
   }
 
   async inspectorAppeared(action: Action<ActionSettings>): Promise<void> {
@@ -124,19 +135,17 @@ export class Contexts {
       inspector.appearances += 1;
     } else {
       for (const id of this.inspectors.keys()) this.retireInspector(id);
-      const settings = this.visible.get(action.id)?.settings ?? {};
       inspector = {
         action,
         active: true,
         appearances: 1,
         sending: false,
         queued: false,
-        requested: false,
-        selection: selectionFromSettings(settings),
       };
       this.inspectors.set(action.id, inspector);
     }
     this.reconcileDemand();
+    this.queueCatalog(inspector);
   }
 
   inspectorDisappeared(id: string): void {
@@ -157,55 +166,38 @@ export class Contexts {
     const inspector = this.inspectors.get(id);
     if (!inspector || !inspector.active || !payload || typeof payload !== "object" || Array.isArray(payload)) return;
     const request = payload as Partial<InspectorRequest>;
-    if (request.event === "catalog") {
-      if (isSelection(request.selection)) {
-        inspector.requested = true;
-        inspector.selection = request.selection;
-        this.queueCatalog(inspector);
-      }
-      return;
-    }
-    if (request.event === "validateCommand")
-      void this.validateInspectorCommand(inspector, request as Record<string, unknown>);
+    if (request.event === "getCatalog") this.queueCatalog(inspector);
   }
 
-  private async validateInspectorCommand(inspector: Inspector, request: Record<string, unknown>): Promise<void> {
-    if (request.slot !== "key" && request.slot !== "press") return;
-    if (typeof request.requestId !== "number" || !Number.isSafeInteger(request.requestId)) return;
-    const requestId = request.requestId;
-    const slot = request.slot;
-    const { command, error } = validateInspectorCommand(this.snapshot, request.binding, request.op, request.text);
-    if (!inspector.active || streamDeck.ui.action?.id !== inspector.action.id) return;
-    try {
-      await streamDeck.ui.sendToPropertyInspector({ event: "commandValidation", slot, requestId, command, error });
-    } catch {
-      /* The inspector may have closed. */
-    }
-  }
-
-  async trigger(id: string, kind: "key" | "press" | "rotate", steps?: number): Promise<void> {
+  async trigger(id: string, slot: "key" | "rotate" | "press", steps?: number): Promise<void> {
     const context = this.visible.get(id);
-    if (!context?.active || !this.client || this.status !== "connected" || !settingsConform(context.settings)) return;
-    const settings = context.settings;
-    const useSecondary =
-      kind === "press" && (settings.pressBinding !== undefined || settings.pressCommand !== undefined);
-    const binding = useSecondary ? (settings.pressBinding ?? settings.binding) : settings.binding;
+    if (!context?.active || !this.client || this.status !== "connected") return;
+    let binding: Binding | undefined;
+    let command: CharacteristicCommand | undefined;
+    if (slot === "key") {
+      if (context.kind !== "key") return;
+      const settings = context.settings as KeySettings;
+      if (!keySettingsConform(settings)) return;
+      binding = keyBinding(settings);
+      command = settings.command;
+    } else {
+      if (context.kind !== "dial") return;
+      const settings = context.settings as DialSettings;
+      if (!dialSettingsConform(settings)) return;
+      binding = slot === "rotate" ? rotateBinding(settings) : pressBinding(settings);
+      if (slot === "press") command = settings.pressCommand;
+    }
     const resolved = resolveBinding(this.snapshot, binding);
     if (!binding || !resolved) return;
     const { device, characteristic } = resolved;
     if (device.status !== "online" || characteristic.status !== "ok") return;
-    let command: CharacteristicCommand | null;
-    if (kind === "rotate") {
-      if (settings.keyCommand && !isCommandApplicable(characteristic, settings.keyCommand)) return;
-      if (!supportsStep(characteristic) || steps === undefined || steps === 0) return;
+    if (slot === "rotate") {
+      if (!rotateEligible(characteristic) || steps === undefined || steps === 0) return;
       command = { op: "step", steps };
-    } else {
-      command = useSecondary
-        ? (settings.pressCommand ?? defaultCommand(characteristic))
-        : (settings.keyCommand ?? defaultCommand(characteristic));
-    }
-    if (!command || !isCommandApplicable(characteristic, command) || (command.op === "step" && command.steps === 0))
+    } else if (slot === "press" && !pressEligible(characteristic)) {
       return;
+    }
+    if (!command || !isCommandApplicable(characteristic, command)) return;
     const key = bindingKey(binding);
     this.pending.set(key, (this.pending.get(key) ?? 0) + 1);
     const controller = new AbortController();
@@ -214,6 +206,7 @@ export class Contexts {
     try {
       // Accepted HTTP observations pass through the shared client's ordering gate/subscription.
       // Never render the initiating response: a later WS observation may already be current.
+      streamDeck.logger.info(`Sending ${command.op} to ${binding.deviceId}/${binding.characteristicId}`);
       await this.client.execute(binding.deviceId, binding.characteristicId, command, { signal: controller.signal });
     } catch (error) {
       if (context.active && !controller.signal.aborted) {
@@ -303,14 +296,24 @@ export class Contexts {
       let rendered = -1;
       while (context.active && rendered !== context.version) {
         rendered = context.version;
-        const bindings = [context.settings.binding, context.settings.pressBinding];
+        const bindings =
+          context.kind === "key"
+            ? [keyBinding(context.settings as KeySettings)]
+            : [rotateBinding(context.settings as DialSettings), pressBinding(context.settings as DialSettings)];
         const pending = bindings.some((binding) => binding && this.pending.has(bindingKey(binding)));
-        const display = renderDisplay(context.settings, this.snapshot, this.status, pending);
-        if (context.action.isKey() || context.action.isDial()) {
-          await context.action.setImage(keyImage(context.settings, this.snapshot, this.status));
+        if (context.kind === "key" && context.action.isKey()) {
+          const settings = context.settings as KeySettings;
+          await context.action.setImage(
+            keyImage(keyBinding(settings), keySettingsConform(settings), this.snapshot, this.status),
+          );
+          await context.action.setTitle(renderKey(settings, this.snapshot, this.status, pending));
+        } else if (context.kind === "dial" && context.action.isDial()) {
+          const settings = context.settings as DialSettings;
+          await context.action.setImage(
+            keyImage(rotateBinding(settings), dialSettingsConform(settings), this.snapshot, this.status),
+          );
+          await context.action.setFeedback(renderDial(settings, this.snapshot, this.status, pending));
         }
-        if (context.action.isDial()) await context.action.setFeedback(display.feedback);
-        else if (context.action.isKey()) await context.action.setTitle(display.title);
       }
     } catch {
       // Render failures are not command failures and must not flash alerts on polling.
@@ -321,7 +324,7 @@ export class Contexts {
 
   private queueCatalog(inspector: Inspector): void {
     inspector.queued = true;
-    if (!inspector.active || !inspector.requested || inspector.sending) return;
+    if (!inspector.active || inspector.sending) return;
     inspector.sending = true;
     void this.catalogLoop(inspector);
   }
@@ -330,7 +333,7 @@ export class Contexts {
     try {
       while (inspector.active && inspector.queued) {
         inspector.queued = false;
-        const catalog = buildCatalog(this.snapshot, this.status, inspector.selection, this.configurationError);
+        const catalog = buildCatalog(this.snapshot, this.status, this.configurationError);
         if (!inspector.active || streamDeck.ui.action?.id !== inspector.action.id) break;
         await streamDeck.ui.sendToPropertyInspector({ event: "catalog", ...catalog });
       }

@@ -23,6 +23,8 @@ pub struct Manifest {
 #[serde(deny_unknown_fields)]
 pub(crate) struct ManifestInventory {
     #[serde(default)]
+    pub(crate) generic: bool,
+    #[serde(default)]
     pub(crate) usb: Vec<UsbInventoryMatch>,
     #[serde(default)]
     pub(crate) bluetooth: Vec<BluetoothInventoryMatch>,

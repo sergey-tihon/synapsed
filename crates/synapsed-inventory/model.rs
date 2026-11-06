@@ -1,6 +1,23 @@
 //! Internal hardware facts collected from native, read-only sources.
 
+use sha2::{Digest, Sha256};
 use synapsed_api::InventorySource;
+
+/// Stable identity shared by Bluetooth endpoint and inventory records.
+pub fn bluetooth_endpoint_identity(native_key: &str) -> String {
+    let digest = Sha256::digest(format!("bluetooth:{native_key}").as_bytes());
+    digest.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+/// Sanitized advertised Bluetooth name used for inventory matching.
+pub fn bluetooth_display_name(raw: &str) -> Option<String> {
+    let name = raw
+        .chars()
+        .filter(|character| !character.is_control())
+        .collect::<String>();
+    let name = name.trim().chars().take(64).collect::<String>();
+    (!name.is_empty()).then_some(name)
+}
 
 /// The broad controller bus represented by a raw controller record.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -61,14 +78,14 @@ pub enum RawRecord {
         /// Whether a USB4 tunnel is reported for one of its ports.
         link_usb4: bool,
     },
-    /// A DDC display endpoint and its graphics controller placement.
+    /// A DDC display endpoint with optional graphics-controller placement.
     Display {
         /// Owner-local endpoint token, never serialized.
         endpoint_token: String,
-        /// DRM/IORegistry connector label.
-        connector: String,
-        /// Graphics-controller key.
-        controller_key: String,
+        /// DRM/IORegistry connector label, when placement is known.
+        connector: Option<String>,
+        /// Graphics-controller key, when placement is known.
+        controller_key: Option<String>,
         /// Display manufacturer label.
         manufacturer: Option<String>,
         /// Display product name.
@@ -89,6 +106,8 @@ pub enum RawRecord {
     BluetoothDevice {
         /// Internal adapter-qualified key.
         key: String,
+        /// Identity of the matching native Bluetooth endpoint, when the platform key permits an exact join.
+        endpoint_identity: Option<String>,
         /// Parent Bluetooth adapter key.
         adapter_key: String,
         /// User-visible alias, if available.
@@ -102,15 +121,26 @@ pub enum RawRecord {
     },
 }
 
+/// A native endpoint associated with a published device binding.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BoundEndpoint {
+    /// Stable inventory key of a DDC display record.
+    Display(String),
+    /// Native Bluetooth endpoint identity and sanitized advertised name.
+    Bluetooth {
+        identity: String,
+        name: Option<String>,
+    },
+}
+
 /// Driver binding for a device published by an installed plugin.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeviceBinding {
     /// Publishing driver ID.
     pub driver: String,
-    /// DDC endpoint tokens associated with this device.
-    pub endpoints: Vec<String>,
+    /// Native endpoints associated with this device.
+    pub endpoints: Vec<BoundEndpoint>,
 }
-
 /// Inventory match declared by an installed driver manifest.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InventoryMatch {
@@ -148,8 +178,8 @@ pub struct DriverCatalogEntry {
     pub id: String,
     /// Driver semantic version.
     pub version: String,
-    /// IDs of drivers superseded by this one.
-    pub supersedes: Vec<String>,
+    /// Whether the manifest declares this driver generic.
+    pub generic: bool,
     /// Explicit inventory selectors from the manifest.
     pub inventory_matches: Vec<InventoryMatch>,
 }

@@ -10,7 +10,7 @@ The package also declares a USB inventory selector for vendor `0bda` / product `
 
 ## Discovery fingerprint and ranges
 
-Both shipped Lua drivers intentionally support one external brightness-capable endpoint at a time. Generic Lua enumerates, reads VCP0x10, requires positive reported maximum and refuses multiple candidates or eligible permission/scan failures preventing uniqueness. Zero candidates declares no device. Installing only generic must not probe vendor registers.
+Both monitor-specific Lua drivers intentionally support one external brightness-capable endpoint at a time. Generic Lua enumerates, reads VCP0x10, requires positive reported maximum and refuses multiple candidates or eligible permission/scan failures preventing uniqueness. Zero candidates declares no device. Installing only generic must not probe vendor registers.
 
 BenQ first uses that selection, rejects a nonempty product name except trimmed case-insensitive `BenQ RD280U` or `RD280U`, then requires all three exact reported maxima:
 
@@ -85,6 +85,6 @@ Linux execution record (2026-10-31): On Linux x86_64, sysfs reported DP-1 enable
 
 ## Safety and unverified behavior
 
-Packages are trusted local Lua code. Allowlists, bounded exchanged data, sampled instructions/memory/deadlines and quarantine limit ordinary faults but cannot universally terminate hostile/native/non-yieldable execution; hostile isolation requires supervised processes. DDC v1 has no unsolicited VCP event; external changes are observed by polling (shipped interval2000 ms plus actual queue/DDC/refresh latency). Future BLE/native notifications require actual factory event bindings, not fake subscription support.
+Packages are trusted local Lua code. Allowlists, bounded exchanged data, sampled instructions/memory/deadlines and quarantine limit ordinary faults but cannot universally terminate hostile/native/non-yieldable execution; hostile isolation requires supervised processes. DDC v1 has no unsolicited VCP event; external changes are observed by polling (shipped interval2000 ms plus actual queue/DDC/refresh latency). Bluetooth v1 supplies declared, factory-bound characteristic notifications; fake-backend tests do not establish physical device behavior.
 
 Before physical writes, capture brightness, Low Blue Light and both raw packed vendor registers with a temporary read-only native inspection harness; establish reliable finally/trap restoration of exact prior raw values including flags. Without that, do no physical write. No monitor setting was changed by the read-only inventory probe above. Fixture/compile/no-device smoke is not OSD external-change, native-client or Linux/macOS physical DDC evidence. Safely restored writes and real external-change fanout require separately recorded evidence on actual accessible hardware. Linux follows distro i2c-dev/group policy, never auto-sudo/I2C_SLAVE_FORCE/world-writable device workarounds; eligible permission errors remain visible while the API works.

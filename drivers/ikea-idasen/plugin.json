@@ -1,0 +1,22 @@
+{
+  "apiVersion": 1,
+  "id": "ikea-idasen",
+  "version": "0.1.0",
+  "entry": "driver.lua",
+  "dependencies": [],
+  "supersedes": [],
+  "capabilities": { "bluetooth": 1 },
+  "permissions": {
+    "bluetooth": {
+      "scan": {
+        "services": ["99fa0001-338a-1024-8a49-009c0215f78a"],
+        "namePrefixes": ["Desk", "IDASEN", "IDÅSEN"]
+      },
+      "characteristics": [
+        { "id": "command", "uuid": "99fa0002-338a-1024-8a49-009c0215f78a", "access": ["write"] },
+        { "id": "height", "uuid": "99fa0021-338a-1024-8a49-009c0215f78a", "access": ["read", "notify"] },
+        { "id": "reference", "uuid": "99fa0031-338a-1024-8a49-009c0215f78a", "access": ["write"] }
+      ]
+    }
+  }
+}

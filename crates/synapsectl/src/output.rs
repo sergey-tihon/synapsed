@@ -74,6 +74,30 @@ impl Output {
         render_characteristic(&mut text, characteristic, "");
         self.text(&text)
     }
+    pub fn command_result(
+        &self,
+        device_id: &str,
+        characteristic_id: &str,
+        snapshot: &Snapshot,
+    ) -> io::Result<()> {
+        let characteristic = snapshot
+            .devices
+            .iter()
+            .find(|device| device.id == device_id)
+            .and_then(|device| {
+                device
+                    .characteristics
+                    .iter()
+                    .find(|characteristic| characteristic.id == characteristic_id)
+            })
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::NotFound,
+                    "command result missing from snapshot",
+                )
+            })?;
+        self.characteristic(device_id, characteristic)
+    }
     pub fn inventory(&self, inventory: &InventoryResponse) -> io::Result<()> {
         if self.json {
             return self.text(&inventory_json(inventory)?);

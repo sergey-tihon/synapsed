@@ -71,6 +71,7 @@ enum Action {
         characteristic: String,
     },
     Open,
+    RestartDriver(String),
     Quit,
 }
 enum CommandItem {
@@ -114,6 +115,7 @@ struct NativeMenu {
     catalog: Option<Arc<Snapshot>>,
     devices: Vec<DeviceMenu>,
     rows: Vec<Row>,
+    driver_items: HashMap<String, MenuItem>,
     actions: HashMap<MenuId, Action>,
 }
 
@@ -123,6 +125,7 @@ pub struct Ui {
     generation: u64,
     next_token: u64,
     pending: HashMap<Key, u64>,
+    pending_driver_restarts: HashMap<String, u64>,
     errors: HashMap<Key, String>,
     last_result: Option<String>,
     snapshot: Option<Arc<Snapshot>>,
@@ -147,6 +150,7 @@ impl Ui {
             generation: 0,
             next_token: 0,
             pending: HashMap::new(),
+            pending_driver_restarts: HashMap::new(),
             errors: HashMap::new(),
             last_result: None,
             snapshot: None,
@@ -168,6 +172,18 @@ impl Ui {
                 } else {
                     self.errors.remove(&key);
                     self.last_result = Some("Command confirmed by service observation.".into());
+                }
+            }
+        }
+        for completion in view.driver_restarts {
+            if self.pending_driver_restarts.get(&completion.driver) == Some(&completion.token) {
+                self.pending_driver_restarts.remove(&completion.driver);
+                if let Some(error) = completion.error {
+                    eprintln!("Synapsed tray: driver restart failed: {error}");
+                    self.last_result = Some(format!("Driver restart failed: {error}"));
+                } else {
+                    self.last_result =
+                        Some(format!("Driver restart completed: {}.", completion.driver));
                 }
             }
         }
@@ -255,6 +271,12 @@ impl Ui {
                 .as_deref()
                 .unwrap_or("Commands require a current service observation."),
         ));
+        for (driver, item) in &self.menu.driver_items {
+            item.set_enabled(
+                self.connection == Connection::Online
+                    && !self.pending_driver_restarts.contains_key(driver),
+            );
+        }
         let Some(snapshot) = &self.snapshot else {
             return;
         };
@@ -297,7 +319,7 @@ impl Ui {
             row.observation.set_text(text(&detail));
             // Shape changes rebuild the command map. These operations were built
             // from validated metadata; dispatch revalidates current applicability.
-            let enabled = !stale && !pending;
+            let enabled = !stale && !pending && self.pending_driver_restarts.is_empty();
             for item in &row.items {
                 item.update(enabled, characteristic);
             }
@@ -309,6 +331,33 @@ impl Ui {
         match self.menu.actions.get(id) {
             Some(Action::Quit) => return true,
             Some(Action::Open) => self.open(worker.endpoint.as_ref(), None),
+            Some(Action::RestartDriver(driver)) => {
+                if self.connection != Connection::Online
+                    || self.pending_driver_restarts.contains_key(driver)
+                    || self.pending.len() + self.pending_driver_restarts.len() >= MAX_PENDING
+                    || self.snapshot.as_ref().is_none_or(|snapshot| {
+                        !snapshot.drivers.iter().any(|item| item.id == *driver)
+                    })
+                {
+                    return false;
+                }
+                self.next_token += 1;
+                let token = self.next_token;
+                match worker.requests.try_send(Request::RestartDriver {
+                    token,
+                    driver: driver.clone(),
+                }) {
+                    Ok(()) => {
+                        self.pending_driver_restarts.insert(driver.clone(), token);
+                        self.last_result = Some(format!("Restart requested: {driver}."));
+                    }
+                    Err(_) => {
+                        self.last_result = Some(
+                            "Driver restart not sent: client worker is busy or stopped.".into(),
+                        );
+                    }
+                }
+            }
             Some(Action::Edit {
                 device,
                 characteristic,
@@ -323,11 +372,13 @@ impl Ui {
                     return false;
                 }
                 let key = binding.key();
-                if self.pending.contains_key(&key) || self.pending.len() >= MAX_PENDING {
+                if self.pending.contains_key(&key)
+                    || self.pending.len() + self.pending_driver_restarts.len() >= MAX_PENDING
+                {
                     return false;
                 }
                 self.next_token += 1;
-                let request = Request {
+                let request = Request::Command {
                     token: self.next_token,
                     binding: binding.clone(),
                 };
@@ -392,6 +443,7 @@ impl NativeMenu {
             catalog: catalog.clone(),
             devices: Vec::new(),
             rows: Vec::new(),
+            driver_items: HashMap::new(),
             actions: HashMap::new(),
         };
         let mut sequence = 0;
@@ -415,9 +467,17 @@ impl NativeMenu {
                     || format!("{} {} — {state}", driver.id, driver.version),
                     |error| format!("{} {} — {state}: {error}", driver.id, driver.version),
                 );
-                drivers
-                    .append(&MenuItem::new(text(&caption), false, None))
-                    .map_err(|error| error.to_string())?;
+                let id = next_id(generation, &mut sequence);
+                let item = MenuItem::with_id(
+                    id.clone(),
+                    text(&format!("{caption} · Restart")),
+                    true,
+                    None,
+                );
+                drivers.append(&item).map_err(|error| error.to_string())?;
+                menu.actions
+                    .insert(id, Action::RestartDriver(driver.id.clone()));
+                menu.driver_items.insert(driver.id.clone(), item);
             }
             menu.root
                 .append(&drivers)

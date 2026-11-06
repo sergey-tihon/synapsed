@@ -13,7 +13,8 @@ use synapsed_api::ApiError;
 use synapsed_core::StateStore;
 use synapsed_ddc::LazyDdc;
 use synapsed_plugins::{
-    CapabilityRegistry, PluginConfig, PluginHost, capabilities::ddc::DdcCapabilityFactory,
+    CapabilityRegistry, PluginConfig, PluginHost,
+    capabilities::{bluetooth::BluetoothCapabilityFactory, ddc::DdcCapabilityFactory},
 };
 
 /// Register transport metadata now, but create its native owner only on a real
@@ -25,6 +26,7 @@ pub fn start_plugins(
     let ddc = LazyDdc::new();
     let mut registry = CapabilityRegistry::default();
     registry.register(Arc::new(DdcCapabilityFactory::with_shared(ddc.clone())))?;
+    registry.register(Arc::new(BluetoothCapabilityFactory::lazy_native()))?;
     let host = PluginHost::start(
         store,
         PluginConfig {

@@ -1,0 +1,29 @@
+[package]
+name = "synapsed-bluetooth"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[features]
+test-support = []
+
+[lints]
+workspace = true
+
+[dependencies]
+synapsed-core = { path = "../synapsed-core" }
+synapsed-inventory = { path = "../synapsed-inventory" }
+tokio = { workspace = true }
+futures-util.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+uuid = "1"
+
+[target.'cfg(any(target_os = "macos", target_os = "linux"))'.dependencies]
+btleplug = "=0.13.5"
+
+[[test]]
+name = "owner"
+path = "tests/owner.rs"
+required-features = ["test-support"]

@@ -74,6 +74,10 @@ impl LogRing {
     pub fn record(&self, level: LogLevel, target: &str, message: &'static str) {
         self.append(level, target, message);
     }
+    /// Command audit line built only from declared (looked-up) IDs and a validated command.
+    pub fn command(&self, level: LogLevel, message: &str) {
+        self.append(level, "synapsed::api", message);
+    }
     pub fn listening(&self, address: std::net::SocketAddr) {
         self.append(
             LogLevel::Info,

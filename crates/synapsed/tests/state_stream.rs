@@ -3,7 +3,7 @@ use common::{start, value};
 use futures_util::{SinkExt, StreamExt};
 use std::time::Duration;
 use synapsed_api::{
-    CharacteristicStatus, CharacteristicValue, ErrorResponse, ServerEvent, Snapshot,
+    CharacteristicStatus, CharacteristicValue, ErrorCode, ErrorResponse, ServerEvent, Snapshot,
 };
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 
@@ -267,6 +267,21 @@ async fn packed_observations_and_coerced_readback_are_authoritative() {
         value(&snapshot, "brightness"),
         Some(CharacteristicValue::Number(60.0))
     );
+    for message in [
+        "Command received: monitor/moonhalo.power toggle",
+        "Command applied: monitor/moonhalo.power toggle",
+        "Command received: monitor/moonhalo.brightness step +1",
+        "Command received: monitor/brightness set 60",
+    ] {
+        assert!(
+            fixture
+                .logs
+                .recent()
+                .iter()
+                .any(|entry| entry.target == "synapsed::api" && entry.message == message),
+            "missing command audit entry: {message}"
+        );
+    }
     fixture.server.shutdown().await.unwrap();
 }
 #[tokio::test]
@@ -352,5 +367,52 @@ async fn brightness_confirmation_reads_only_target_when_vendor_register_fails() 
         assert!(!confirmed_reads.is_empty());
         assert!(confirmed_reads.iter().all(|call| call.1 == 0x10));
     }
+    fixture.server.shutdown().await.unwrap();
+}
+#[tokio::test]
+async fn driver_restart_returns_current_status_and_unknown_driver_error() {
+    let mut fixture = start(&["generic-ddc"]).await;
+    fixture
+        .wait_for(|snapshot| {
+            snapshot.drivers.iter().any(|driver| {
+                driver.id == "generic-ddc" && driver.state == synapsed_api::DriverState::Online
+            })
+        })
+        .await;
+    let response = fixture
+        .http
+        .post(format!(
+            "{}/api/v1/drivers/generic-ddc/restart",
+            fixture.base()
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    let snapshot: Snapshot = response.json().await.unwrap();
+    snapshot.validate().unwrap();
+    assert_eq!(
+        snapshot
+            .drivers
+            .iter()
+            .find(|driver| driver.id == "generic-ddc")
+            .unwrap()
+            .state,
+        synapsed_api::DriverState::Online
+    );
+    assert!(fixture.hardware.lock().unwrap().set_calls.is_empty());
+
+    let response = fixture
+        .http
+        .post(format!(
+            "{}/api/v1/drivers/not-installed/restart",
+            fixture.base()
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 404);
+    let error: ErrorResponse = response.json().await.unwrap();
+    assert_eq!(error.error.code, ErrorCode::UnknownDriver);
     fixture.server.shutdown().await.unwrap();
 }
