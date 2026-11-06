@@ -14,6 +14,7 @@ updates:
   - package-ecosystem: npm
     directory: /
     schedule: { interval: weekly, day: monday }
+    versioning-strategy: lockfile-only
     open-pull-requests-limit: 10
     groups:
       solid: { patterns: ["solid-js", "@solidjs/*", "vite", "vitest", "jsdom"] }
