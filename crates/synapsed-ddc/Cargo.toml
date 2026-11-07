@@ -15,6 +15,7 @@ workspace = true
 synapsed-inventory = { path = "../synapsed-inventory" }
 synapsed-core = { path = "../synapsed-core" }
 serde = { workspace = true }
+serde_json = { workspace = true }
 tokio = { workspace = true }
 sha2.workspace = true
 libc.workspace = true
@@ -23,8 +24,6 @@ libc.workspace = true
 i2cdev = "=0.6.2"
 
 [dev-dependencies]
-
-serde_json = { workspace = true }
 
 [[test]]
 name = "protocol_fixtures"

@@ -1,10 +1,12 @@
 import { For, Show } from "solid-js";
 import { href } from "../router";
+import DriverDiscoveryStatus from "../components/DriverDiscoveryStatus";
 import { useSession } from "../session";
 
 export default function Devices() {
   const session = useSession();
   const snapshot = () => session.snapshot();
+  const isCurrent = () => session.connection() === "connected";
   return (
     <div class="page-stack">
       <header class="page-title">
@@ -23,11 +25,49 @@ export default function Devices() {
           </section>
         }
       >
+        <section class="panel" aria-labelledby="driver-discovery-heading">
+          <div class="section-heading">
+            <div>
+              <p class="eyebrow">LOADED IS NOT DISCOVERED</p>
+              <h2 id="driver-discovery-heading">Driver discovery</h2>
+            </div>
+          </div>
+          <p class="muted">
+            Online means the driver is loaded and operating. The line under each driver says whether it has published a
+            matching device.
+          </p>
+          <Show when={snapshot()?.drivers.length} fallback={<p class="muted">No driver packages installed.</p>}>
+            <ul class="driver-discovery-list">
+              <For each={snapshot()?.drivers ?? []}>
+                {(driver) => (
+                  <li>
+                    <div class="driver-discovery-row">
+                      <div>
+                        <strong>{driver.id}</strong>
+                        <span class="muted">{driver.version}</span>
+                      </div>
+                      <span class="badge" data-state={driver.state}>
+                        {driver.state}
+                      </span>
+                    </div>
+                    <DriverDiscoveryStatus
+                      driver={driver}
+                      devices={snapshot()?.devices.filter((device) => device.driver === driver.id) ?? []}
+                      isCurrent={isCurrent()}
+                    />
+                    {driver.error ? <p class="error">{driver.error.message}</p> : null}
+                  </li>
+                )}
+              </For>
+            </ul>
+          </Show>
+        </section>
         <Show
           when={snapshot()?.devices.length}
           fallback={
             <section class="panel">
-              <p>No devices are currently published. No controls are manufactured.</p>
+              <h2>No devices discovered</h2>
+              <p>No controls are available until a driver matches and publishes a device.</p>
             </section>
           }
         >
@@ -44,7 +84,7 @@ export default function Devices() {
                       </div>
                       <span class="badge" data-state={device.status}>
                         {device.status}
-                        {session.connection() === "connected" ? "" : " · stale"}
+                        {isCurrent() ? "" : " · stale"}
                       </span>
                     </div>
                     <p class="muted">{device.id}</p>
