@@ -30,10 +30,21 @@ describe("driver discovery summary", () => {
     });
   });
 
-  it("explains that a non-online driver is not currently discovering", () => {
+  it("uses neutral wording for retryable driver failures", () => {
     expect(driverDiscoverySummary("permission_denied", [], true)).toEqual({
-      message: "Driver permission denied · discovery not active",
+      message: "Driver permission denied · discovery status unavailable",
       state: "error",
+    });
+    expect(driverDiscoverySummary("disconnected", [], true)).toEqual({
+      message: "Driver disconnected · discovery status unavailable",
+      state: "warn",
+    });
+  });
+
+  it("reports disabled drivers as stopped", () => {
+    expect(driverDiscoverySummary("disabled", [], true)).toEqual({
+      message: "Driver disabled · discovery stopped",
+      state: "warn",
     });
   });
 });

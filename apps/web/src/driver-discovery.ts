@@ -13,10 +13,13 @@ export function driverDiscoverySummary(
   if (!isCurrent) {
     return { message: "Snapshot stale · discovery status unknown", state: "warn" };
   }
+  if (driverState === "disabled") {
+    return { message: "Driver disabled · discovery stopped", state: "warn" };
+  }
   if (driverState !== "online") {
     const state = driverState.replaceAll("_", " ");
     const tone = driverState === "error" || driverState === "permission_denied" ? "error" : "warn";
-    return { message: `Driver ${state} · discovery not active`, state: tone };
+    return { message: `Driver ${state} · discovery status unavailable`, state: tone };
   }
   if (devices.length === 0) {
     return { message: "Loaded · no matching device discovered", state: "warn" };

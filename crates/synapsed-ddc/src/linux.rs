@@ -10,15 +10,17 @@ use i2cdev::{
 use serde::Deserialize;
 use std::{
     collections::{HashMap, HashSet},
-    env, fs,
-    io::{self, Read, Write},
-    os::unix::{
-        fs::{FileTypeExt, MetadataExt},
-        net::UnixStream,
+    env, fs, io,
+    os::{
+        fd::{AsRawFd, FromRawFd, OwnedFd, RawFd},
+        unix::{
+            ffi::OsStrExt,
+            fs::{FileTypeExt, MetadataExt},
+        },
     },
     path::{Path, PathBuf},
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 const HYPRLAND_SOCKET_TIMEOUT: Duration = Duration::from_millis(250);
@@ -118,41 +120,185 @@ fn hyprland_socket_path() -> Option<PathBuf> {
     Some(socket)
 }
 
-/// Query only active output names from the current user's Hyprland IPC socket.
-/// Unknown monitor fields, including serial-like metadata, are ignored and never logged.
-fn hyprland_active_connectors() -> Option<HashSet<String>> {
-    let mut socket = UnixStream::connect(hyprland_socket_path()?).ok()?;
-    socket
-        .set_read_timeout(Some(HYPRLAND_SOCKET_TIMEOUT))
-        .ok()?;
-    socket
-        .set_write_timeout(Some(HYPRLAND_SOCKET_TIMEOUT))
-        .ok()?;
-    socket.write_all(b"j/monitors").ok()?;
+fn wait_for_socket(fd: RawFd, events: libc::c_short, deadline: Instant) -> bool {
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return false;
+        }
+        let timeout_ms = remaining
+            .as_nanos()
+            .div_ceil(1_000_000)
+            .clamp(1, i32::MAX as u128) as i32;
+        let mut descriptor = libc::pollfd {
+            fd,
+            events,
+            revents: 0,
+        };
+        let result = unsafe { libc::poll(&mut descriptor, 1, timeout_ms) };
+        if result > 0 {
+            return Instant::now() < deadline;
+        }
+        if result == 0 || io::Error::last_os_error().kind() != io::ErrorKind::Interrupted {
+            return false;
+        }
+    }
+}
 
+fn connect_hyprland_socket(path: &Path, deadline: Instant) -> Option<OwnedFd> {
+    if Instant::now() >= deadline {
+        return None;
+    }
+    let path_bytes = path.as_os_str().as_bytes();
+    if path_bytes.is_empty() || path_bytes.contains(&0) {
+        return None;
+    }
+    let mut address: libc::sockaddr_un = unsafe { std::mem::zeroed() };
+    if path_bytes.len() >= address.sun_path.len() {
+        return None;
+    }
+    address.sun_family = libc::AF_UNIX as libc::sa_family_t;
+    for (slot, byte) in address.sun_path.iter_mut().zip(path_bytes) {
+        *slot = *byte as libc::c_char;
+    }
+
+    let raw_fd = unsafe {
+        libc::socket(
+            libc::AF_UNIX,
+            libc::SOCK_STREAM | libc::SOCK_NONBLOCK | libc::SOCK_CLOEXEC,
+            0,
+        )
+    };
+    if raw_fd < 0 {
+        return None;
+    }
+    let socket = unsafe { OwnedFd::from_raw_fd(raw_fd) };
+    let address_len = (std::mem::offset_of!(libc::sockaddr_un, sun_path) + path_bytes.len() + 1)
+        as libc::socklen_t;
+    let result = unsafe {
+        libc::connect(
+            socket.as_raw_fd(),
+            (&address as *const libc::sockaddr_un).cast(),
+            address_len,
+        )
+    };
+    if result < 0 {
+        let error = io::Error::last_os_error().raw_os_error()?;
+        if error != libc::EINPROGRESS && error != libc::EAGAIN {
+            return None;
+        }
+        if !wait_for_socket(socket.as_raw_fd(), libc::POLLOUT, deadline)
+            || Instant::now() >= deadline
+        {
+            return None;
+        }
+        let mut socket_error: libc::c_int = 0;
+        let mut socket_error_len = std::mem::size_of_val(&socket_error) as libc::socklen_t;
+        let result = unsafe {
+            libc::getsockopt(
+                socket.as_raw_fd(),
+                libc::SOL_SOCKET,
+                libc::SO_ERROR,
+                (&mut socket_error as *mut libc::c_int).cast(),
+                &mut socket_error_len,
+            )
+        };
+        if result < 0 || socket_error != 0 {
+            return None;
+        }
+    }
+    Some(socket)
+}
+
+fn write_socket_request(fd: RawFd, request: &[u8], deadline: Instant) -> bool {
+    let mut written = 0;
+    while written < request.len() {
+        if Instant::now() >= deadline {
+            return false;
+        }
+        let result = unsafe {
+            libc::send(
+                fd,
+                request[written..].as_ptr().cast(),
+                request.len() - written,
+                libc::MSG_DONTWAIT | libc::MSG_NOSIGNAL,
+            )
+        };
+        if result > 0 {
+            written += result as usize;
+            continue;
+        }
+        if result == 0 {
+            return false;
+        }
+        match io::Error::last_os_error().raw_os_error() {
+            Some(libc::EINTR) => continue,
+            Some(libc::EAGAIN) => {
+                if !wait_for_socket(fd, libc::POLLOUT, deadline) {
+                    return false;
+                }
+            }
+            _ => return false,
+        }
+    }
+    true
+}
+
+fn read_socket_response(fd: RawFd, deadline: Instant) -> Option<Vec<u8>> {
     let mut response = Vec::new();
     let mut chunk = [0u8; 4096];
     loop {
-        match socket.read(&mut chunk) {
-            Ok(0) => break,
-            Ok(read) => {
-                if response.len().saturating_add(read) > HYPRLAND_RESPONSE_LIMIT {
-                    return None;
+        if Instant::now() >= deadline {
+            return Some(response);
+        }
+        let result = unsafe {
+            libc::recv(
+                fd,
+                chunk.as_mut_ptr().cast(),
+                chunk.len(),
+                libc::MSG_DONTWAIT,
+            )
+        };
+        if result == 0 {
+            return Some(response);
+        }
+        if result > 0 {
+            let read = result as usize;
+            if response.len().saturating_add(read) > HYPRLAND_RESPONSE_LIMIT {
+                return None;
+            }
+            response.extend_from_slice(&chunk[..read]);
+            continue;
+        }
+        match io::Error::last_os_error().raw_os_error() {
+            Some(libc::EINTR) => continue,
+            Some(libc::EAGAIN) => {
+                if !wait_for_socket(fd, libc::POLLIN, deadline) {
+                    return Some(response);
                 }
-                response.extend_from_slice(&chunk[..read]);
             }
-            Err(error)
-                if matches!(
-                    error.kind(),
-                    io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
-                ) =>
-            {
-                break;
-            }
-            Err(_) => return None,
+            _ => return None,
         }
     }
+}
+
+fn query_hyprland_socket(path: &Path, timeout: Duration) -> Option<HashSet<String>> {
+    let deadline = Instant::now().checked_add(timeout)?;
+    let socket = connect_hyprland_socket(path, deadline)?;
+    if !write_socket_request(socket.as_raw_fd(), b"j/monitors", deadline) {
+        return None;
+    }
+    let response = read_socket_response(socket.as_raw_fd(), deadline)?;
+    if Instant::now() >= deadline {
+        return None;
+    }
     parse_hyprland_active_connectors(&response)
+}
+
+/// Query only active output names from the current user's Hyprland IPC socket.
+/// Unknown monitor fields, including serial-like metadata, are ignored and never logged.
+fn hyprland_active_connectors() -> Option<HashSet<String>> {
+    query_hyprland_socket(&hyprland_socket_path()?, HYPRLAND_SOCKET_TIMEOUT)
 }
 
 fn hyprland_connector_hint(
@@ -161,7 +307,8 @@ fn hyprland_connector_hint(
 ) -> Option<HyprlandConnectorHint> {
     let entries = fs::read_dir(sysfs_root.join("class/drm")).ok()?;
     let mut cards_by_connector: HashMap<String, HashSet<String>> = HashMap::new();
-    for entry in entries.filter_map(Result::ok) {
+    for entry in entries {
+        let entry = entry.ok()?;
         let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
             continue;
         };
@@ -490,14 +637,16 @@ mod protocol_fixtures {
 mod sysfs_policy {
     use super::{
         disabled_drm_connector, hyprland_connector_hint, parse_hyprland_active_connectors,
-        redundant_amdgpu_hardware_path,
+        query_hyprland_socket, redundant_amdgpu_hardware_path,
     };
     use std::{
         collections::HashSet,
         fs,
-        os::unix::fs::symlink,
+        io::{Read, Write},
+        os::unix::{fs::symlink, net::UnixListener},
         path::{Path, PathBuf},
-        time::{SystemTime, UNIX_EPOCH},
+        thread,
+        time::{Duration, Instant, SystemTime, UNIX_EPOCH},
     };
 
     fn adapter(
@@ -630,6 +779,47 @@ mod sysfs_policy {
         assert!(disabled_drm_connector(&root, "i2c-10", Some(&hint)));
 
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn hyprland_ipc_query_obeys_one_deadline_across_incremental_reads() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "synapsed-hyprland-ipc-{}-{nonce}.sock",
+            std::process::id()
+        ));
+        let listener = UnixListener::bind(&path).unwrap();
+        let server = thread::spawn(move || {
+            let Ok((mut client, _)) = listener.accept() else {
+                return;
+            };
+            let mut request = [0; 10];
+            if client.read_exact(&mut request).is_err() || &request != b"j/monitors" {
+                return;
+            }
+            for chunk in [
+                &b"[{"[..],
+                &b"\"name\":\"DP-1\","[..],
+                &b"\"disabled\":false"[..],
+                &b"}]"[..],
+            ] {
+                thread::sleep(Duration::from_millis(60));
+                if client.write_all(chunk).is_err() {
+                    break;
+                }
+            }
+        });
+
+        let started = Instant::now();
+        let result = query_hyprland_socket(&path, Duration::from_millis(150));
+        let elapsed = started.elapsed();
+        assert!(result.is_none());
+        assert!(elapsed < Duration::from_millis(500));
+        server.join().unwrap();
+        fs::remove_file(path).unwrap();
     }
 
     #[test]
