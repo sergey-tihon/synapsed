@@ -1,6 +1,7 @@
 import { createEffect, createMemo, createSignal, For, onSettled, Show } from "solid-js";
 import type { InventoryResponse } from "@synapsed/client";
 import { DEFAULT_HARDWARE_FILTERS, href } from "../router";
+import DriverDiscoveryStatus from "../components/DriverDiscoveryStatus";
 import { useSession } from "../session";
 
 export default function Overview() {
@@ -196,6 +197,11 @@ export default function Overview() {
                         {driver.state}
                       </span>
                     </div>
+                    <DriverDiscoveryStatus
+                      driver={driver}
+                      devices={snapshot()?.devices.filter((device) => device.driver === driver.id) ?? []}
+                      isCurrent={session.connection() === "connected"}
+                    />
                     {driver.error ? (
                       <p class="error">
                         {driver.error.code}: {driver.error.message}

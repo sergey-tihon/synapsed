@@ -7,7 +7,24 @@ use i2cdev::{
     core::{I2CMessage, I2CTransfer},
     linux::{LinuxI2CBus, LinuxI2CError, LinuxI2CMessage},
 };
-use std::{collections::HashSet, fs, io, path::Path, thread};
+use serde::Deserialize;
+use std::{
+    collections::{HashMap, HashSet},
+    env, fs, io,
+    os::{
+        fd::{AsRawFd, FromRawFd, OwnedFd, RawFd},
+        unix::{
+            ffi::OsStrExt,
+            fs::{FileTypeExt, MetadataExt},
+        },
+    },
+    path::{Path, PathBuf},
+    thread,
+    time::{Duration, Instant},
+};
+
+const HYPRLAND_SOCKET_TIMEOUT: Duration = Duration::from_millis(250);
+const HYPRLAND_RESPONSE_LIMIT: usize = 64 * 1024;
 
 /// Linux i2c-dev backend that discovers eligible display endpoints.
 pub struct LinuxBackend;
@@ -23,15 +40,314 @@ pub fn eligible_adapter(name: &str) -> bool {
         .iter()
         .any(|prefix| name.starts_with(prefix))
 }
-/// Adapters owned by a DRM connector the compositor disabled are not selectable display paths.
-/// This also resolves connector `ddc` links used by AMDGPU hardware-I2C adapters.
-/// Missing or unreadable attributes keep the adapter eligible so hidden candidates still block uniqueness.
-fn disabled_drm_connector(sysfs_root: &Path, adapter_key: &str) -> bool {
+#[derive(Deserialize)]
+struct HyprlandMonitor {
+    name: String,
+    disabled: bool,
+}
+
+#[derive(Debug)]
+struct HyprlandConnectorHint {
+    active: HashSet<String>,
+    unambiguous: HashSet<String>,
+}
+
+fn valid_connector_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 128
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+}
+
+fn connector_parts(entry: &str) -> Option<(String, String)> {
+    let (card, connector) = entry.strip_prefix("card")?.split_once('-')?;
+    if card.is_empty()
+        || !card.bytes().all(|byte| byte.is_ascii_digit())
+        || !valid_connector_name(connector)
+    {
+        return None;
+    }
+    Some((card.to_owned(), connector.to_owned()))
+}
+
+fn parse_hyprland_active_connectors(response: &[u8]) -> Option<HashSet<String>> {
+    let monitors: Vec<HyprlandMonitor> = serde_json::from_slice(response).ok()?;
+    if monitors.len() > 128 {
+        return None;
+    }
+    let mut seen = HashSet::new();
+    let mut active = HashSet::new();
+    for monitor in monitors {
+        if !valid_connector_name(&monitor.name) || !seen.insert(monitor.name.clone()) {
+            return None;
+        }
+        if !monitor.disabled {
+            active.insert(monitor.name);
+        }
+    }
+    Some(active)
+}
+
+fn hyprland_socket_path() -> Option<PathBuf> {
+    let runtime_dir = PathBuf::from(env::var_os("XDG_RUNTIME_DIR")?);
+    if !runtime_dir.is_absolute() {
+        return None;
+    }
+    let signature = env::var("HYPRLAND_INSTANCE_SIGNATURE").ok()?;
+    if signature.is_empty()
+        || signature.len() > 128
+        || !signature
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+    {
+        return None;
+    }
+    let runtime_metadata = fs::metadata(&runtime_dir).ok()?;
+    if !runtime_metadata.is_dir() || runtime_metadata.uid() != unsafe { libc::geteuid() } {
+        return None;
+    }
+    let socket = runtime_dir
+        .join("hypr")
+        .join(signature)
+        .join(".socket.sock");
+    let socket_metadata = fs::symlink_metadata(&socket).ok()?;
+    if !socket_metadata.file_type().is_socket()
+        || socket_metadata.uid() != unsafe { libc::geteuid() }
+    {
+        return None;
+    }
+    Some(socket)
+}
+
+fn wait_for_socket(fd: RawFd, events: libc::c_short, deadline: Instant) -> bool {
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return false;
+        }
+        let timeout_ms = remaining
+            .as_nanos()
+            .div_ceil(1_000_000)
+            .clamp(1, i32::MAX as u128) as i32;
+        let mut descriptor = libc::pollfd {
+            fd,
+            events,
+            revents: 0,
+        };
+        let result = unsafe { libc::poll(&mut descriptor, 1, timeout_ms) };
+        if result > 0 {
+            return Instant::now() < deadline;
+        }
+        if result == 0 || io::Error::last_os_error().kind() != io::ErrorKind::Interrupted {
+            return false;
+        }
+    }
+}
+
+fn connect_hyprland_socket(path: &Path, deadline: Instant) -> Option<OwnedFd> {
+    if Instant::now() >= deadline {
+        return None;
+    }
+    let path_bytes = path.as_os_str().as_bytes();
+    if path_bytes.is_empty() || path_bytes.contains(&0) {
+        return None;
+    }
+    let mut address: libc::sockaddr_un = unsafe { std::mem::zeroed() };
+    if path_bytes.len() >= address.sun_path.len() {
+        return None;
+    }
+    address.sun_family = libc::AF_UNIX as libc::sa_family_t;
+    for (slot, byte) in address.sun_path.iter_mut().zip(path_bytes) {
+        *slot = *byte as libc::c_char;
+    }
+
+    let raw_fd = unsafe {
+        libc::socket(
+            libc::AF_UNIX,
+            libc::SOCK_STREAM | libc::SOCK_NONBLOCK | libc::SOCK_CLOEXEC,
+            0,
+        )
+    };
+    if raw_fd < 0 {
+        return None;
+    }
+    let socket = unsafe { OwnedFd::from_raw_fd(raw_fd) };
+    let address_len = (std::mem::offset_of!(libc::sockaddr_un, sun_path) + path_bytes.len() + 1)
+        as libc::socklen_t;
+    let result = unsafe {
+        libc::connect(
+            socket.as_raw_fd(),
+            (&address as *const libc::sockaddr_un).cast(),
+            address_len,
+        )
+    };
+    if result < 0 {
+        let error = io::Error::last_os_error().raw_os_error()?;
+        if error != libc::EINPROGRESS && error != libc::EAGAIN {
+            return None;
+        }
+        if !wait_for_socket(socket.as_raw_fd(), libc::POLLOUT, deadline)
+            || Instant::now() >= deadline
+        {
+            return None;
+        }
+        let mut socket_error: libc::c_int = 0;
+        let mut socket_error_len = std::mem::size_of_val(&socket_error) as libc::socklen_t;
+        let result = unsafe {
+            libc::getsockopt(
+                socket.as_raw_fd(),
+                libc::SOL_SOCKET,
+                libc::SO_ERROR,
+                (&mut socket_error as *mut libc::c_int).cast(),
+                &mut socket_error_len,
+            )
+        };
+        if result < 0 || socket_error != 0 {
+            return None;
+        }
+    }
+    Some(socket)
+}
+
+fn write_socket_request(fd: RawFd, request: &[u8], deadline: Instant) -> bool {
+    let mut written = 0;
+    while written < request.len() {
+        if Instant::now() >= deadline {
+            return false;
+        }
+        let result = unsafe {
+            libc::send(
+                fd,
+                request[written..].as_ptr().cast(),
+                request.len() - written,
+                libc::MSG_DONTWAIT | libc::MSG_NOSIGNAL,
+            )
+        };
+        if result > 0 {
+            written += result as usize;
+            continue;
+        }
+        if result == 0 {
+            return false;
+        }
+        match io::Error::last_os_error().raw_os_error() {
+            Some(libc::EINTR) => continue,
+            Some(libc::EAGAIN) => {
+                if !wait_for_socket(fd, libc::POLLOUT, deadline) {
+                    return false;
+                }
+            }
+            _ => return false,
+        }
+    }
+    true
+}
+
+fn read_socket_response(fd: RawFd, deadline: Instant) -> Option<Vec<u8>> {
+    let mut response = Vec::new();
+    let mut chunk = [0u8; 4096];
+    loop {
+        if Instant::now() >= deadline {
+            return Some(response);
+        }
+        let result = unsafe {
+            libc::recv(
+                fd,
+                chunk.as_mut_ptr().cast(),
+                chunk.len(),
+                libc::MSG_DONTWAIT,
+            )
+        };
+        if result == 0 {
+            return Some(response);
+        }
+        if result > 0 {
+            let read = result as usize;
+            if response.len().saturating_add(read) > HYPRLAND_RESPONSE_LIMIT {
+                return None;
+            }
+            response.extend_from_slice(&chunk[..read]);
+            continue;
+        }
+        match io::Error::last_os_error().raw_os_error() {
+            Some(libc::EINTR) => continue,
+            Some(libc::EAGAIN) => {
+                if !wait_for_socket(fd, libc::POLLIN, deadline) {
+                    return Some(response);
+                }
+            }
+            _ => return None,
+        }
+    }
+}
+
+fn query_hyprland_socket(path: &Path, timeout: Duration) -> Option<HashSet<String>> {
+    let deadline = Instant::now().checked_add(timeout)?;
+    let socket = connect_hyprland_socket(path, deadline)?;
+    if !write_socket_request(socket.as_raw_fd(), b"j/monitors", deadline) {
+        return None;
+    }
+    let response = read_socket_response(socket.as_raw_fd(), deadline)?;
+    if Instant::now() >= deadline {
+        return None;
+    }
+    parse_hyprland_active_connectors(&response)
+}
+
+/// Query only active output names from the current user's Hyprland IPC socket.
+/// Unknown monitor fields, including serial-like metadata, are ignored and never logged.
+fn hyprland_active_connectors() -> Option<HashSet<String>> {
+    query_hyprland_socket(&hyprland_socket_path()?, HYPRLAND_SOCKET_TIMEOUT)
+}
+
+fn hyprland_connector_hint(
+    sysfs_root: &Path,
+    active: HashSet<String>,
+) -> Option<HyprlandConnectorHint> {
+    let entries = fs::read_dir(sysfs_root.join("class/drm")).ok()?;
+    let mut cards_by_connector: HashMap<String, HashSet<String>> = HashMap::new();
+    for entry in entries {
+        let entry = entry.ok()?;
+        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        if let Some((card, connector)) = connector_parts(&name) {
+            cards_by_connector
+                .entry(connector)
+                .or_default()
+                .insert(card);
+        }
+    }
+    let unambiguous = cards_by_connector
+        .into_iter()
+        .filter_map(|(connector, cards)| (cards.len() == 1).then_some(connector))
+        .collect();
+    Some(HyprlandConnectorHint {
+        active,
+        unambiguous,
+    })
+}
+
+/// Use Hyprland as an active-output hint only when its name maps to one DRM card.
+/// Otherwise retain the sysfs policy; EDID validation and endpoint arbitration remain mandatory.
+fn disabled_drm_connector(
+    sysfs_root: &Path,
+    adapter_key: &str,
+    hyprland: Option<&HyprlandConnectorHint>,
+) -> bool {
     let Some(connector) =
         synapsed_inventory::linux::drm::connector_for_adapter(sysfs_root, adapter_key)
     else {
         return false;
     };
+    if let (Some(hyprland), Some(entry)) =
+        (hyprland, connector.file_name().and_then(|n| n.to_str()))
+        && let Some((_, name)) = connector_parts(entry)
+        && hyprland.unambiguous.contains(&name)
+    {
+        return !hyprland.active.contains(&name);
+    }
     fs::read_to_string(connector.join("enabled")).is_ok_and(|enabled| enabled.trim() == "disabled")
 }
 fn auxiliary_connectors(sysfs_root: &Path) -> HashSet<(String, String)> {
@@ -129,7 +445,10 @@ impl DdcBackend for LinuxBackend {
         };
         let mut endpoints = Vec::new();
         let mut errors = Vec::new();
-        let auxiliary = auxiliary_connectors(Path::new("/sys"));
+        let sysfs_root = Path::new("/sys");
+        let hyprland = hyprland_active_connectors()
+            .and_then(|active| hyprland_connector_hint(sysfs_root, active));
+        let auxiliary = auxiliary_connectors(sysfs_root);
         for entry in entries {
             let entry = match entry {
                 Ok(entry) => entry,
@@ -158,11 +477,10 @@ impl DdcBackend for LinuxBackend {
             if !eligible_adapter(adapter.trim()) {
                 continue;
             }
-            if disabled_drm_connector(Path::new("/sys"), name) {
+            if disabled_drm_connector(sysfs_root, name, hyprland.as_ref()) {
                 continue;
             }
-            let placement =
-                synapsed_inventory::linux::drm::placement_for_adapter(Path::new("/sys"), name);
+            let placement = synapsed_inventory::linux::drm::placement_for_adapter(sysfs_root, name);
             if redundant_amdgpu_hardware_path(adapter.trim(), placement.as_ref(), &auxiliary) {
                 continue;
             }
@@ -317,13 +635,18 @@ mod protocol_fixtures {
 
 #[cfg(test)]
 mod sysfs_policy {
-    use super::{disabled_drm_connector, redundant_amdgpu_hardware_path};
+    use super::{
+        disabled_drm_connector, hyprland_connector_hint, parse_hyprland_active_connectors,
+        query_hyprland_socket, redundant_amdgpu_hardware_path,
+    };
     use std::{
         collections::HashSet,
         fs,
-        os::unix::fs::symlink,
+        io::{Read, Write},
+        os::unix::{fs::symlink, net::UnixListener},
         path::{Path, PathBuf},
-        time::{SystemTime, UNIX_EPOCH},
+        thread,
+        time::{Duration, Instant, SystemTime, UNIX_EPOCH},
     };
 
     fn adapter(
@@ -353,6 +676,11 @@ mod sysfs_policy {
             fs::create_dir_all(&i2c_device).unwrap();
             symlink(i2c_device, adapter_path.join("device")).unwrap();
         }
+        if subsystem == "drm" {
+            let drm_class = root.join("class/drm");
+            fs::create_dir_all(&drm_class).unwrap();
+            symlink(&device, drm_class.join(connector_name)).unwrap();
+        }
         adapter_path
     }
 
@@ -369,10 +697,10 @@ mod sysfs_policy {
         let pci = adapter(&root, "i2c-11", "pci", "", Some("disabled\n"));
         let missing = adapter(&root, "i2c-12", "drm", "card0-DP-2", None);
 
-        assert!(disabled_drm_connector(&root, "i2c-9"));
-        assert!(!disabled_drm_connector(&root, "i2c-10"));
-        assert!(!disabled_drm_connector(&root, "i2c-11"));
-        assert!(!disabled_drm_connector(&root, "i2c-12"));
+        assert!(disabled_drm_connector(&root, "i2c-9", None));
+        assert!(!disabled_drm_connector(&root, "i2c-10", None));
+        assert!(!disabled_drm_connector(&root, "i2c-11", None));
+        assert!(!disabled_drm_connector(&root, "i2c-12", None));
         assert!(disabled.exists() && enabled.exists() && pci.exists() && missing.exists());
 
         let auxiliary = HashSet::from([("0000:00:02.0".into(), "DP-1".into())]);
@@ -408,6 +736,110 @@ mod sysfs_policy {
     }
 
     #[test]
+    fn hyprland_active_output_overrides_stale_sysfs_but_excludes_disabled_output() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "synapsed-ddc-hyprland-active-{}-{nonce}",
+            std::process::id()
+        ));
+        let hyprland_disabled_dp3 = adapter(&root, "i2c-9", "drm", "card0-DP-3", Some("enabled\n"));
+        let stale_dp1 = adapter(&root, "i2c-10", "drm", "card0-DP-1", Some("disabled\n"));
+        let active = parse_hyprland_active_connectors(
+            br#"[{"name":"DP-1","disabled":false},{"name":"DP-3","disabled":true}]"#,
+        )
+        .unwrap();
+        let hint = hyprland_connector_hint(&root, active).unwrap();
+
+        assert!(hyprland_disabled_dp3.exists() && stale_dp1.exists());
+        assert!(!disabled_drm_connector(&root, "i2c-10", Some(&hint)));
+        assert!(disabled_drm_connector(&root, "i2c-9", Some(&hint)));
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn hyprland_connector_name_collision_falls_back_to_sysfs() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "synapsed-ddc-hyprland-ambiguous-{}-{nonce}",
+            std::process::id()
+        ));
+        adapter(&root, "i2c-9", "drm", "card0-DP-1", Some("disabled\n"));
+        adapter(&root, "i2c-10", "drm", "card1-DP-1", Some("disabled\n"));
+        let hint = hyprland_connector_hint(&root, HashSet::from(["DP-1".to_owned()])).unwrap();
+
+        assert!(!hint.unambiguous.contains("DP-1"));
+        assert!(disabled_drm_connector(&root, "i2c-9", Some(&hint)));
+        assert!(disabled_drm_connector(&root, "i2c-10", Some(&hint)));
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn hyprland_ipc_query_obeys_one_deadline_across_incremental_reads() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "synapsed-hyprland-ipc-{}-{nonce}.sock",
+            std::process::id()
+        ));
+        let listener = UnixListener::bind(&path).unwrap();
+        let server = thread::spawn(move || {
+            let Ok((mut client, _)) = listener.accept() else {
+                return;
+            };
+            let mut request = [0; 10];
+            if client.read_exact(&mut request).is_err() || &request != b"j/monitors" {
+                return;
+            }
+            for chunk in [
+                &b"[{"[..],
+                &b"\"name\":\"DP-1\","[..],
+                &b"\"disabled\":false"[..],
+                &b"}]"[..],
+            ] {
+                thread::sleep(Duration::from_millis(60));
+                if client.write_all(chunk).is_err() {
+                    break;
+                }
+            }
+        });
+
+        let started = Instant::now();
+        let result = query_hyprland_socket(&path, Duration::from_millis(150));
+        let elapsed = started.elapsed();
+        assert!(result.is_none());
+        assert!(elapsed < Duration::from_millis(500));
+        server.join().unwrap();
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn hyprland_monitor_response_rejects_bad_or_duplicate_output_names() {
+        assert!(
+            parse_hyprland_active_connectors(br#"[{"name":"../DP-1","disabled":false}]"#).is_none()
+        );
+        assert!(
+            parse_hyprland_active_connectors(
+                br#"[{"name":"DP-1","disabled":false},{"name":"DP-1","disabled":false}]"#
+            )
+            .is_none()
+        );
+        assert_eq!(
+            parse_hyprland_active_connectors(br#"[{"name":"DP-1","disabled":false}]"#),
+            Some(HashSet::from(["DP-1".to_owned()]))
+        );
+    }
+
+    #[test]
     fn ddc_linked_adapter_inherits_disabled_connector_state() {
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -434,7 +866,7 @@ mod sysfs_policy {
         fs::create_dir_all(&drm_class).unwrap();
         symlink(&connector, drm_class.join("card0-DP-3")).unwrap();
 
-        assert!(disabled_drm_connector(&root, "i2c-0"));
+        assert!(disabled_drm_connector(&root, "i2c-0", None));
         fs::remove_dir_all(root).unwrap();
     }
 }
