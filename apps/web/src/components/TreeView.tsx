@@ -1,4 +1,4 @@
-import { createEffect, createMemo, createSignal, For, onCleanup, Show } from "solid-js";
+import { createEffect, createMemo, createSignal, For, onCleanup, Show, untrack } from "solid-js";
 import type { InventoryNodeKind } from "@synapsed/client";
 import type { InventoryTreeNode } from "../inventory";
 import { href } from "../router";
@@ -81,11 +81,13 @@ function ruleLabel(node: InventoryTreeNode["node"]): string {
 
 export default function TreeView(props: Props) {
   const allExpandable = createMemo(() => [...collectExpandable(props.roots)]);
-  const initiallyExpanded = new Set(props.roots.filter((root) => root.children.length).map((root) => root.node.id));
+  const initiallyExpanded = untrack(
+    () => new Set(props.roots.filter((root) => root.children.length).map((root) => root.node.id)),
+  );
   const [expanded, setExpanded] = createSignal<ReadonlySet<string>>(initiallyExpanded);
-  const [activeId, setActiveId] = createSignal(props.roots[0]?.node.id ?? "");
+  const [activeId, setActiveId] = createSignal(untrack(() => props.roots[0]?.node.id ?? ""));
   const rowElements = new Map<string, HTMLLIElement>();
-  let knownExpandable = new Set(allExpandable());
+  let knownExpandable = new Set(untrack(allExpandable));
   const visibleRows = createMemo(() => flattenVisible(props.roots, expanded()));
   const allExpanded = () => allExpandable().length > 0 && allExpandable().every((id) => expanded().has(id));
 

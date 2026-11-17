@@ -1,4 +1,4 @@
-import { createEffect, createMemo, createSignal, For, onSettled, Show } from "solid-js";
+import { createEffect, createMemo, createSignal, For, onSettled, Show, untrack } from "solid-js";
 import type { InventoryResponse } from "@synapsed/client";
 import { applyFilters, groupByAttachment } from "../inventory";
 import type { HardwareFilters } from "../router";
@@ -19,7 +19,10 @@ export default function Hardware(props: Props) {
   const [loading, setLoading] = createSignal(false);
   let requestController: AbortController | undefined;
   let requestId = 0;
-  let revisionKey = session.snapshot() ? `${session.snapshot()?.node.instanceId}:${session.snapshot()?.revision}` : "";
+  let revisionKey = untrack(() => {
+    const snapshot = session.snapshot();
+    return snapshot ? `${snapshot.node.instanceId}:${snapshot.revision}` : "";
+  });
 
   async function refresh(): Promise<void> {
     requestController?.abort();
